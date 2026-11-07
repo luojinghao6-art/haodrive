@@ -55,6 +55,25 @@ CREATE TABLE IF NOT EXISTS uploads (
     received INTEGER NOT NULL DEFAULT 0,
     created INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS file_groups (
+    folder_id INTEGER NOT NULL,
+    first_message_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    mime TEXT,
+    kind TEXT,
+    created INTEGER NOT NULL,
+    parts_count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (folder_id, first_message_id)
+);
+CREATE TABLE IF NOT EXISTS file_group_parts (
+    folder_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    first_message_id INTEGER NOT NULL,
+    part_index INTEGER NOT NULL,
+    part_size INTEGER NOT NULL,
+    PRIMARY KEY (folder_id, message_id)
+);
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -315,3 +334,101 @@ def job_prune(max_age: int = 86400, keep_terminal: int = 200) -> None:
             "(SELECT id FROM jobs WHERE state IN ('done','error') ORDER BY created DESC LIMIT ?)",
             (keep_terminal,),
         )
+
+
+# ---- multi-part files ----------------------------------------------------
+# Telegram caps a document at 2GB. Bigger uploads are sent as consecutive
+# part messages; these tables stitch them into one logical file.
+
+def group_save(folder_id: int, first_id: int, name: str, size: int,
+               mime: str | None, kind: str | None,
+               parts: list[dict[str, int]]) -> None:
+    now = int(time.time())
+    with _lock, connect() as conn:
+        conn.execute(
+            "INSERT INTO file_groups(folder_id, first_message_id, name, size, mime, kind,"
+            " created, parts_count) VALUES(?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(folder_id, first_message_id) DO UPDATE SET name=excluded.name,"
+            " size=excluded.size, mime=excluded.mime, kind=excluded.kind,"
+            " parts_count=excluded.parts_count",
+            (folder_id, first_id, name, size, mime or "", kind or "file", now, len(parts)),
+        )
+        conn.execute(
+            "DELETE FROM file_group_parts WHERE folder_id=? AND first_message_id=?",
+            (folder_id, first_id),
+        )
+        conn.executemany(
+            "INSERT INTO file_group_parts(folder_id, message_id, first_message_id,"
+            " part_index, part_size) VALUES(?,?,?,?,?)",
+            [(folder_id, int(p["id"]), first_id, index, int(p["size"]))
+             for index, p in enumerate(parts)],
+        )
+
+
+def group_get(folder_id: int, first_id: int) -> dict[str, Any] | None:
+    with _lock, connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM file_groups WHERE folder_id=? AND first_message_id=?",
+            (folder_id, first_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def group_by_message(folder_id: int, message_id: int) -> dict[str, Any] | None:
+    """Return the group a message belongs to, whether it is the first part or not."""
+    with _lock, connect() as conn:
+        row = conn.execute(
+            "SELECT g.* FROM file_group_parts p JOIN file_groups g"
+            " ON g.folder_id=p.folder_id AND g.first_message_id=p.first_message_id"
+            " WHERE p.folder_id=? AND p.message_id=?",
+            (folder_id, message_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def group_parts(folder_id: int, first_id: int) -> list[dict[str, Any]]:
+    with _lock, connect() as conn:
+        rows = conn.execute(
+            "SELECT message_id, part_size FROM file_group_parts"
+            " WHERE folder_id=? AND first_message_id=? ORDER BY part_index",
+            (folder_id, first_id),
+        ).fetchall()
+    return [{"message_id": row["message_id"], "part_size": row["part_size"]} for row in rows]
+
+
+def groups_for_folder(folder_id: int) -> tuple[dict[int, dict[str, Any]], set[int]]:
+    """Groups keyed by their first message id, plus ids that must stay hidden."""
+    with _lock, connect() as conn:
+        groups = conn.execute(
+            "SELECT * FROM file_groups WHERE folder_id=?", (folder_id,)
+        ).fetchall()
+        parts = conn.execute(
+            "SELECT message_id, first_message_id FROM file_group_parts WHERE folder_id=?",
+            (folder_id,),
+        ).fetchall()
+    mapping = {row["first_message_id"]: dict(row) for row in groups}
+    hidden = {row["message_id"] for row in parts
+              if row["message_id"] != row["first_message_id"]}
+    return mapping, hidden
+
+
+def group_delete(folder_id: int, first_id: int) -> None:
+    with _lock, connect() as conn:
+        conn.execute(
+            "DELETE FROM file_group_parts WHERE folder_id=? AND first_message_id=?",
+            (folder_id, first_id),
+        )
+        conn.execute(
+            "DELETE FROM file_groups WHERE folder_id=? AND first_message_id=?",
+            (folder_id, first_id),
+        )
+
+
+def search_groups(folder_id: int, query: str, limit: int = 200) -> list[int]:
+    with _lock, connect() as conn:
+        rows = conn.execute(
+            "SELECT first_message_id FROM file_groups WHERE folder_id=? AND name LIKE ?"
+            " ORDER BY created DESC LIMIT ?",
+            (folder_id, f"%{query}%", limit),
+        ).fetchall()
+    return [row["first_message_id"] for row in rows]

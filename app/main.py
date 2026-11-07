@@ -632,7 +632,8 @@ async def media_response(folder_id: int, message_id: int, request: Request,
                          inline: bool) -> Response:
     info = await backend.file_info(folder_id, message_id)
     size = int(info["size"])
-    etag = f'"{message_id}-{size}"'
+    file_id = int(info.get("id", message_id))
+    etag = f'"{file_id}-{size}"'
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers={"ETag": etag})
     try:
@@ -675,7 +676,7 @@ async def media_response(folder_id: int, message_id: int, request: Request,
     if request.method == "HEAD":
         return Response(status_code=status, headers=headers, media_type=media_type)
     if backend.name == "telegram":
-        cache_key = f"{folder_id}_{message_id}_{info.get('date', 0)}"
+        cache_key = f"{folder_id}_{file_id}_{info.get('date', 0)}"
         fetcher = lambda offset, limit: backend.download_iter(folder_id, message_id, offset, limit)
         stream = media_cache.stream(cache_key, size, start, length, fetcher)
         if inline and kind in ("video", "audio") and config.PREBUFFER_MB > 0:

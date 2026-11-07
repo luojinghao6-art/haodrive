@@ -13,6 +13,7 @@
 - 文件夹管理：新建 = 在 Telegram 建私有频道（标题带 `[TD]`），自动识别桌面版建的旧频道
 - 文件列表、搜索、分页
 - 拖拽 / 多选上传，浏览器→服务器、服务器→Telegram 两段进度
+- 超过 2GB 自动分片上传，网页端合并为一个文件
 - 下载，支持 HTTP Range（断点续传、视频拖动进度条）
 - 在线预览：图片、视频、音频、PDF、文本
 - 删除、移动到其它文件夹（转发+删除原消息）
@@ -30,7 +31,7 @@
 
 - **文件不落在 VPS 磁盘上**（上传时只在 `/data/tmp` 中转过一下），VPS 只需要很小的盘。
 - 你的 Telegram 账号就是存储账号，频道就是文件夹，手机上用 Telegram 也能直接看到这些文件。
-- Telegram 单文件上限 **2GB**（非 Premium），超过会失败。
+- **大文件自动分片**：超过 `TELEGRAM_PART_BYTES`（默认 2GB）的文件会拆成多条 Telegram 消息上传，网页里仍然显示成一个文件，播放、拖动、下载、分享、移动、删除都按整体处理。单条消息的 2GB 是 Telegram 的硬限制，拆片是为了绕过它。
 
 ---
 
@@ -139,7 +140,9 @@ docker compose up -d --build    # 更新代码后重建
 - 看 `docker compose logs -f app` 里的报错。
 
 **文件超过 2GB**
-- Telegram 硬限制。桌面版客户端也一样。
+- 会自动拆成多条消息（每片默认 2GB，`TELEGRAM_PART_BYTES` 可调），网页端仍是一个文件。
+- 直接在 Telegram 客户端里看会看到 `xxx.part001` 这样的分片，属于正常现象。
+- 总大小上限由 `MAX_UPLOAD_BYTES` 控制（默认 20GB），还要受 VPS 临时磁盘空间限制（上传时整份文件要落在 `data/tmp`）。
 
 **想用桌面版 Telegram-Drive 建的旧文件夹**
 - 会自动识别（标题里的 `[TD]` 或频道简介里的 `[telegram-drive-folder]` 标记）。

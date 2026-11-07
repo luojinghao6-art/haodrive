@@ -339,7 +339,7 @@ function renderFiles() {
       <div class="thumb-wrap">${media}${state.selecting ? '<span class="pick"></span>' : ''}</div>
       <div class="file-meta">
         <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
-        <div class="file-sub">${bytes(file.size)} · ${when(file.date)}</div>
+        <div class="file-sub">${bytes(file.size)}${file.parts > 1 ? ` · ${file.parts} 分片` : ''} · ${when(file.date)}</div>
       </div>
       <div class="file-actions">
         <button class="ghost icon" data-act="download" title="下载">⬇</button>

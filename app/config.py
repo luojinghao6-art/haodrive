@@ -18,7 +18,11 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "").strip()
 DEMO_MODE = os.getenv("DEMO_MODE", "0").lower() in ("1", "true", "yes", "on")
 PROXY = os.getenv("PROXY", "").strip()
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(2 * 1024**3)))
+# Largest logical file accepted (parts are stitched back into one file).
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(20 * 1024**3)))
+# Telegram rejects documents over 2GB, so larger files are split into parts
+# below this size and merged again for listing / playback / download.
+TELEGRAM_PART_BYTES = int(os.getenv("TELEGRAM_PART_BYTES", str(2_000_000_000)))
 SESSION_DAYS = int(os.getenv("SESSION_DAYS", "7"))
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "").strip()
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()

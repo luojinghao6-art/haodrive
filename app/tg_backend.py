@@ -68,6 +68,46 @@ def friendly_error(error: Exception) -> str:
     return text
 
 
+class _SliceReader:
+    """Bounded sequential reader over an open file, for uploading one part."""
+
+    def __init__(self, handle, length: int, name: str) -> None:
+        self._handle = handle
+        self._remaining = length
+        self.name = name
+
+    def read(self, size: int = -1) -> bytes:
+        if self._remaining <= 0:
+            return b""
+        if size is None or size < 0 or size > self._remaining:
+            size = self._remaining
+        data = self._handle.read(size)
+        self._remaining -= len(data)
+        return data
+
+    def seekable(self) -> bool:
+        return False
+
+
+def plan_parts(parts: list[dict[str, Any]], offset: int, length: int) -> list[tuple[int, int, int]]:
+    """Map a byte range of the merged file onto (message_id, part_offset, take)."""
+    plan: list[tuple[int, int, int]] = []
+    position = 0
+    end = offset + length
+    for part in parts:
+        size = int(part.get("size", part.get("part_size", 0)))
+        start = position
+        stop = position + size
+        position = stop
+        if stop <= offset or start >= end:
+            continue
+        local = max(offset, start) - start
+        take = min(end, stop) - max(offset, start)
+        if take > 0:
+            plan.append((int(part.get("id", part.get("message_id"))), local, take))
+    return plan
+
+
 @dataclass
 class UploadJob:
     id: str
@@ -461,6 +501,20 @@ class TelegramBackend:
         # held fewer media messages than the limit.
         # Local display-name overlay: Telegram cannot rename, so the web app
         # keeps its own name for each message.
+        groups, hidden = db.groups_for_folder(folder_id)
+        if groups:
+            items = [item for item in items if item["id"] not in hidden]
+            for item in items:
+                group = groups.get(item["id"])
+                if not group:
+                    continue
+                item.update({
+                    "size": group["size"],
+                    "name": group["name"],
+                    "mime": group["mime"] or item.get("mime", ""),
+                    "kind": group["kind"] or item.get("kind", "file"),
+                    "parts": group["parts_count"],
+                })
         names = db.display_names(folder_id, [item["id"] for item in items])
         seen = set()
         for item in items:
@@ -468,7 +522,11 @@ class TelegramBackend:
             if item["id"] in names:
                 item["name"] = names[item["id"]]
         if search:
-            for message_id in db.search_display_names(folder_id, search):
+            candidates = db.search_display_names(folder_id, search)
+            for first_id in db.search_groups(folder_id, search):
+                if first_id not in candidates:
+                    candidates.append(first_id)
+            for message_id in candidates:
                 if message_id in seen:
                     continue
                 try:
@@ -476,6 +534,15 @@ class TelegramBackend:
                 except BackendError:
                     continue
                 info = describe(message)
+                group = groups.get(message_id)
+                if group:
+                    info.update({
+                        "size": group["size"],
+                        "name": group["name"],
+                        "mime": group["mime"] or info.get("mime", ""),
+                        "kind": group["kind"] or info.get("kind", "file"),
+                        "parts": group["parts_count"],
+                    })
                 override = db.display_names(folder_id, [message_id]).get(message_id)
                 if override:
                     info["name"] = override
@@ -499,14 +566,38 @@ class TelegramBackend:
         return message
 
     async def file_info(self, folder_id: int, message_id: int) -> dict[str, Any]:
-        info = describe(await self._message(folder_id, message_id))
-        override = db.display_names(folder_id, [message_id]).get(message_id)
+        group = db.group_by_message(folder_id, message_id)
+        target = group["first_message_id"] if group else message_id
+        info = describe(await self._message(folder_id, target))
+        if group:
+            info.update({
+                "size": group["size"],
+                "name": group["name"],
+                "mime": group["mime"] or info.get("mime", ""),
+                "kind": group["kind"] or info.get("kind", "file"),
+                "parts": group["parts_count"],
+            })
+        override = db.display_names(folder_id, [target]).get(target)
         if override:
             info["name"] = override
         return info
 
     async def download_iter(self, folder_id: int, message_id: int, offset: int = 0,
                             length: int | None = None) -> AsyncIterator[bytes]:
+        group = db.group_by_message(folder_id, message_id)
+        if group:
+            parts = db.group_parts(folder_id, group["first_message_id"])
+            if length is None:
+                length = max(0, group["size"] - offset)
+            for part_id, part_offset, take in plan_parts(parts, offset, length):
+                async for chunk in self._download_message(folder_id, part_id, part_offset, take):
+                    yield chunk
+            return
+        async for chunk in self._download_message(folder_id, message_id, offset, length):
+            yield chunk
+
+    async def _download_message(self, folder_id: int, message_id: int, offset: int = 0,
+                                length: int | None = None) -> AsyncIterator[bytes]:
         client = self._client()
         message = await self._message(folder_id, message_id)
         size = int(message.file.size or 0) if message.file else 0
@@ -539,10 +630,12 @@ class TelegramBackend:
             raise BackendError(friendly_error(error))
 
     async def thumbnail(self, folder_id: int, message_id: int) -> bytes | None:
-        cache = config.CACHE_DIR / f"{folder_id}_{message_id}.thumb"
+        group = db.group_by_message(folder_id, message_id)
+        target = group["first_message_id"] if group else message_id
+        cache = config.CACHE_DIR / f"{folder_id}_{target}.thumb"
         if cache.exists() and time.time() - cache.stat().st_mtime < THUMB_TTL:
             return cache.read_bytes()
-        message = await self._message(folder_id, message_id)
+        message = await self._message(folder_id, target)
         payload = b""
         for thumb in (-1, 0):
             buffer = io.BytesIO()
@@ -561,18 +654,47 @@ class TelegramBackend:
     async def delete_file(self, folder_id: int, message_id: int) -> None:
         client = self._client()
         entity = await self._entity(folder_id)
+        group = db.group_by_message(folder_id, message_id)
+        if group:
+            ids = [p["message_id"] for p in db.group_parts(folder_id, group["first_message_id"])]
+        else:
+            ids = [message_id]
         try:
-            await client.delete_messages(entity, [message_id])
+            await client.delete_messages(entity, ids)
         except Exception as error:
             raise BackendError(friendly_error(error))
-        self._msg_cache.pop((folder_id, message_id), None)
-        db.clear_display_name(folder_id, message_id)
+        for part_id in ids:
+            self._msg_cache.pop((folder_id, part_id), None)
+            db.clear_display_name(folder_id, part_id)
+        if group:
+            db.group_delete(folder_id, group["first_message_id"])
 
     async def move_file(self, src_folder: int, message_id: int, dst_folder: int) -> int | None:
         client = self._client()
         src = await self._entity(src_folder)
         dst = await self._entity(dst_folder)
+        group = db.group_by_message(src_folder, message_id)
         try:
+            if group:
+                parts = db.group_parts(src_folder, group["first_message_id"])
+                ids = [p["message_id"] for p in parts]
+                result = await client.forward_messages(dst, ids, src)
+                messages = result if isinstance(result, list) else [result]
+                new_ids = [m.id for m in messages if m is not None]
+                if len(new_ids) != len(ids):
+                    raise BackendError("转发失败，源文件已保留")
+                await client.delete_messages(src, ids)
+                db.group_save(
+                    dst_folder, new_ids[0], group["name"], group["size"],
+                    group["mime"], group["kind"],
+                    [{"id": new_id, "size": part["part_size"]}
+                     for new_id, part in zip(new_ids, parts)],
+                )
+                db.group_delete(src_folder, group["first_message_id"])
+                db.move_display_name(src_folder, group["first_message_id"], dst_folder, new_ids[0])
+                for part_id in ids:
+                    self._msg_cache.pop((src_folder, part_id), None)
+                return new_ids[0]
             forwarded = await client.forward_messages(dst, message_id, src)
             new_id = forwarded_id(forwarded)
             if not new_id:
@@ -589,7 +711,28 @@ class TelegramBackend:
         client = self._client()
         src = await self._entity(src_folder)
         dst = await self._entity(dst_folder)
+        group = db.group_by_message(src_folder, message_id)
         try:
+            if group:
+                parts = db.group_parts(src_folder, group["first_message_id"])
+                ids = [p["message_id"] for p in parts]
+                result = await client.forward_messages(dst, ids, src)
+                messages = result if isinstance(result, list) else [result]
+                new_ids = [m.id for m in messages if m is not None]
+                if len(new_ids) != len(ids):
+                    raise BackendError("复制失败")
+                db.group_save(
+                    dst_folder, new_ids[0], group["name"], group["size"],
+                    group["mime"], group["kind"],
+                    [{"id": new_id, "size": part["part_size"]}
+                     for new_id, part in zip(new_ids, parts)],
+                )
+                override = db.display_names(
+                    src_folder, [group["first_message_id"]]
+                ).get(group["first_message_id"])
+                if override:
+                    db.set_display_name(dst_folder, new_ids[0], override)
+                return new_ids[0]
             forwarded = await client.forward_messages(dst, message_id, src)
             new_id = forwarded_id(forwarded)
             override = db.display_names(src_folder, [message_id]).get(message_id)
@@ -605,29 +748,78 @@ class TelegramBackend:
         new_name = os.path.basename(new_name.strip())
         if not new_name:
             raise BackendError("文件名不能为空")
-        message = await self._message(folder_id, message_id)
-        db.set_display_name(folder_id, message_id, new_name)
-        info = describe(message)
-        info["name"] = new_name
-        return info
+        group = db.group_by_message(folder_id, message_id)
+        target = group["first_message_id"] if group else message_id
+        await self._message(folder_id, target)
+        db.set_display_name(folder_id, target, new_name)
+        return await self.file_info(folder_id, target)
 
     async def upload(self, folder_id: int, path: Path, name: str,
                      progress: Callable[[int, int], None] | None = None) -> dict[str, Any]:
         client = self._client()
         entity = await self._entity(folder_id)
+        size = os.path.getsize(path)
+        part_bytes = max(1, config.TELEGRAM_PART_BYTES)
+        if size <= part_bytes:
+            try:
+                uploaded = await client.upload_file(
+                    str(path), part_size_kb=512, file_size=size, file_name=name,
+                    progress_callback=(lambda cur, total: progress(cur, total) if progress else None),
+                )
+                message = await client.send_file(
+                    entity, uploaded, force_document=True,
+                    attributes=[DocumentAttributeFilename(file_name=name)],
+                    caption="",
+                )
+            except Exception as error:
+                raise BackendError(friendly_error(error))
+            return describe(message)
+
+        # Telegram caps one document at 2GB: send consecutive parts and keep a
+        # local group row so the web app still shows a single file.
+        count = (size + part_bytes - 1) // part_bytes
+        mime, _ = mimetypes.guess_type(name)
+        mime = mime or "application/octet-stream"
+        kind = _kind_from_mime(mime)
+        parts: list[dict[str, int]] = []
         try:
-            uploaded = await client.upload_file(
-                str(path), part_size_kb=512, file_size=os.path.getsize(path), file_name=name,
-                progress_callback=(lambda cur, total: progress(cur, total) if progress else None),
-            )
-            message = await client.send_file(
-                entity, uploaded, force_document=True,
-                attributes=[DocumentAttributeFilename(file_name=name)],
-                caption="",
-            )
+            with path.open("rb") as handle:
+                for index in range(count):
+                    offset = index * part_bytes
+                    length = min(part_bytes, size - offset)
+                    handle.seek(offset)
+                    part_name = f"{name}.part{index + 1:03d}"
+                    reader = _SliceReader(handle, length, part_name)
+
+                    def report(current: int, _total: int, base: int = offset) -> None:
+                        if progress:
+                            progress(base + current, size)
+
+                    uploaded = await client.upload_file(
+                        reader, part_size_kb=512, file_size=length, file_name=part_name,
+                        progress_callback=report,
+                    )
+                    caption = f"[TD-PART {index + 1}/{count}]"
+                    message = await client.send_file(
+                        entity, uploaded, force_document=True,
+                        attributes=[DocumentAttributeFilename(file_name=part_name)],
+                        caption=caption,
+                    )
+                    parts.append({"id": message.id, "size": length})
         except Exception as error:
+            sent = [part["id"] for part in parts]
+            if sent:
+                try:
+                    await client.delete_messages(entity, sent)
+                except Exception:
+                    pass
             raise BackendError(friendly_error(error))
-        return describe(message)
+
+        first = parts[0]["id"]
+        db.group_save(folder_id, first, name, size, mime, kind, parts)
+        info = describe(await self._message(folder_id, first))
+        info.update({"name": name, "size": size, "mime": mime, "kind": kind, "parts": count})
+        return info
 
     # ---- upload queue ----------------------------------------------------
 
