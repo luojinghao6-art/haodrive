@@ -11,6 +11,8 @@ def test_share_token_cannot_be_admin_session():
     share = security.issue_share("token123")
     assert security.verify_share("token123", share)
     assert not security.verify_share("other", share)
+    # Non-canonical base64 must not sneak past the signature check either.
+    assert not security.verify_share("token123", share + "x")
     # A share cookie must never double as an admin session cookie.
     assert not security.verify_session(share)
 

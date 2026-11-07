@@ -76,6 +76,22 @@ def bump_session_epoch() -> None:
     db.kv_set("session_epoch", str(int(time.time() * 1000)))
 
 
+def _decode_token(value: str) -> bytes | None:
+    """Decode a signed token, rejecting non-canonical base64.
+
+    Python's base64 decoder tolerates stray trailing characters on some
+    versions, so a token with junk appended can decode to the same bytes.
+    Re-encoding and comparing forces exactly one valid spelling per token.
+    """
+    try:
+        raw = base64.urlsafe_b64decode(value.encode())
+    except Exception:
+        return None
+    if base64.urlsafe_b64encode(raw).decode() != value:
+        return None
+    return raw
+
+
 def issue_session(days: int | None = None) -> str:
     days = days or config.SESSION_DAYS
     expiry = int(time.time()) + days * 86400
@@ -87,8 +103,10 @@ def issue_session(days: int | None = None) -> str:
 def verify_session(token: str | None) -> bool:
     if not token:
         return False
+    raw = _decode_token(token)
+    if raw is None:
+        return False
     try:
-        raw = base64.urlsafe_b64decode(token.encode())
         payload, sig = raw.rsplit(b".", 1)
         role, epoch, expiry, _nonce = payload.decode().split(":")
     except Exception:
@@ -117,8 +135,10 @@ def issue_share(token: str, ttl_seconds: int = 3600) -> str:
 def verify_share(token: str, value: str | None) -> bool:
     if not value:
         return False
+    raw = _decode_token(value)
+    if raw is None:
+        return False
     try:
-        raw = base64.urlsafe_b64decode(value.encode())
         payload, sig = raw.rsplit(b".", 1)
         role, share_token, expiry = payload.decode().split(":")
     except Exception:
