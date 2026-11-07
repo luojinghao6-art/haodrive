@@ -1,0 +1,17 @@
+import { chromium } from 'playwright';
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: 'dark' });
+await page.goto('http://127.0.0.1:8010/', { waitUntil: 'networkidle' });
+await page.screenshot({ path: 'tools/shot-login.png' });
+await page.fill('#login-password', 'demo');
+await page.click('#login-form button');
+await page.waitForSelector('.file-card', { timeout: 15000 });
+await page.screenshot({ path: 'tools/shot-main.png' });
+const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, colorScheme: 'dark' });
+await mobile.goto('http://127.0.0.1:8010/', { waitUntil: 'networkidle' });
+await mobile.fill('#login-password', 'demo');
+await mobile.click('#login-form button');
+await mobile.waitForSelector('.file-card', { timeout: 15000 });
+await mobile.screenshot({ path: 'tools/shot-mobile.png' });
+await browser.close();
+console.log('shots ok');

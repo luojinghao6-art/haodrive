@@ -1,0 +1,39 @@
+# 站点只在一个随机路径下响应，其余一律 404。
+# 分享链接走 /s/<random token>，token 本身足够随机，扫描不到。
+{$DOMAIN} {
+	encode zstd gzip
+
+	redir /{$SECRET_PATH} /{$SECRET_PATH}/ 308
+
+	@app path /{$SECRET_PATH}/*
+	handle @app {
+		uri strip_prefix /{$SECRET_PATH}
+		reverse_proxy app:8000 {
+			flush_interval -1
+			header_up X-Forwarded-Prefix /{$SECRET_PATH}
+		}
+	}
+
+	@share path /s/*
+	handle @share {
+		reverse_proxy app:8000 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+
+	# Access logging is intentionally off: URIs contain the secret path and
+	# share tokens. The app logs redacted request lines to journald instead.
+
+}

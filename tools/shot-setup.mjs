@@ -1,0 +1,10 @@
+import { chromium } from 'playwright';
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1100, height: 760 }, colorScheme: 'dark' });
+await page.goto('http://127.0.0.1:8011/', { waitUntil: 'networkidle' });
+await page.fill('#login-password', 'demo');
+await page.click('#login-form button');
+await page.waitForSelector('#view-setup:not(.hidden)', { timeout: 10000 });
+await page.screenshot({ path: 'tools/shot-setup.png' });
+await browser.close();
+console.log('ok');
