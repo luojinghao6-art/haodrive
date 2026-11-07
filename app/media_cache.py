@@ -199,32 +199,85 @@ class MediaCache:
 
                     skip = position - block_start
                     buffer = bytearray()
-                    async for piece in fetcher(block_start, block_len):
-                        if not piece:
-                            continue
-                        piece_start = len(buffer)
-                        buffer.extend(piece)
-                        if len(buffer) <= skip:
-                            continue
-                        fresh = max(skip, piece_start)
-                        take = min(len(buffer) - fresh, end - position)
-                        if take <= 0:
+                    written = False
+                    try:
+                        async for piece in fetcher(block_start, block_len):
+                            if not piece:
+                                continue
+                            piece_start = len(buffer)
+                            buffer.extend(piece)
+                            if len(buffer) <= skip:
+                                continue
+                            fresh = max(skip, piece_start)
+                            take = min(len(buffer) - fresh, end - position)
+                            if take <= 0:
+                                if position >= end:
+                                    break
+                                continue
+                            out = bytes(buffer[fresh:fresh + take])
+                            position += take
+                            yield out
                             if position >= end:
                                 break
-                            continue
-                        out = bytes(buffer[fresh:fresh + take])
-                        position += take
-                        yield out
-                        if position >= end:
-                            break
-                    if len(buffer) == block_len:
-                        await asyncio.to_thread(self._write_block, entry, block, bytes(buffer))
+                        if len(buffer) == block_len:
+                            await asyncio.to_thread(self._write_block, entry, block, bytes(buffer))
+                            written = True
+                    finally:
+                        # A video player asks for small ranges and aborts the
+                        # rest; without this the block never completes, so the
+                        # next range downloads the same bytes from Telegram
+                        # again and prefetch never starts.
+                        if not written and buffer:
+                            self._complete_block(entry, block, buffer, fetcher)
                         self._schedule_prefetch(entry, block, fetcher, allow_prefetch)
                     with self._mutex:
                         entry.last_used = time.time()
         finally:
             with self._mutex:
                 entry.active -= 1
+
+    def _complete_block(
+        self,
+        entry: Entry,
+        block: int,
+        have: bytearray,
+        fetcher: Callable[[int, int], AsyncIterator[bytes]],
+    ) -> None:
+        """Finish a block the client stopped reading halfway through."""
+        length = self.block_length(entry.size, block)
+
+        async def work() -> None:
+            lock = self._block_locks.setdefault((entry.key, block), asyncio.Lock())
+            async with lock:
+                with self._mutex:
+                    if block in entry.blocks:
+                        return
+                    marker = (entry.key, block)
+                    if marker in self._inflight:
+                        return
+                    self._inflight.add(marker)
+                try:
+                    async with self._prefetch_slots:
+                        buffer = bytearray(have[:length])
+                        if len(buffer) < length:
+                            async for piece in fetcher(
+                                block * BLOCK + len(buffer), length - len(buffer)
+                            ):
+                                buffer.extend(piece)
+                                if len(buffer) >= length:
+                                    break
+                        if len(buffer) >= length:
+                            await asyncio.to_thread(
+                                self._write_block, entry, block, bytes(buffer[:length])
+                            )
+                except Exception:
+                    pass
+                finally:
+                    self._inflight.discard(marker)
+
+        task = asyncio.create_task(work())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     def warm(
         self,
@@ -248,7 +301,10 @@ class MediaCache:
             self._warming.add(key)
             entry.active += 1
 
-        first = max(0, start // BLOCK)
+        # Start past the normal prefetch window: those blocks are already
+        # fetched for the foreground, and grabbing their locks here would make
+        # the first bytes of the stream wait for a whole block.
+        first = max(0, start // BLOCK + PREFETCH_BLOCKS + 1)
         last = self.block_count(size)
         if max_bytes is not None:
             last = min(last, first + max(1, (max_bytes + BLOCK - 1) // BLOCK))

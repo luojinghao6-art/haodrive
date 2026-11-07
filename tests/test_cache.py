@@ -69,24 +69,55 @@ def test_concurrent_streams_return_correct_bytes(tmp_path):
 
 
 def test_warm_fills_cache_ahead(tmp_path):
+    from app.media_cache import PREFETCH_BLOCKS
+
     async def scenario():
-        cache = MediaCache(tmp_path / "cache", capacity_bytes=BLOCK * 8)
-        size = BLOCK * 3
+        cache = MediaCache(tmp_path / "cache", capacity_bytes=BLOCK * 16)
+        size = BLOCK * 10
         calls = []
 
         async def fetcher(offset, length):
             calls.append(offset)
-            yield b"\x00" * length
+            yield bytes(length)
 
         task = cache.warm("warm", size, fetcher, start=0, max_bytes=BLOCK * 3)
         assert task is not None
         await task
-        assert cache.stats()["used"] == size
-        assert calls == [0, BLOCK, BLOCK * 2]
+        first = PREFETCH_BLOCKS + 1
+        assert calls == [first * BLOCK, (first + 1) * BLOCK, (first + 2) * BLOCK]
+        assert cache.stats()["used"] == BLOCK * 3
 
         calls.clear()
-        chunks = [c async for c in cache.stream("warm", size, 0, 4096, fetcher)]
-        assert b"".join(chunks) == b"\x00" * 4096
+        chunks = [c async for c in cache.stream("warm", size, first * BLOCK, 4096, fetcher)]
+        assert b"".join(chunks) == bytes(4096)
         assert calls == [], "warmed blocks must be served from disk"
+
+    asyncio.run(scenario())
+
+
+def test_partial_range_still_fills_cache(tmp_path):
+    async def scenario():
+        cache = MediaCache(tmp_path / "cache", capacity_bytes=BLOCK * 4)
+        size = BLOCK
+        calls = []
+
+        async def fetcher(offset, length):
+            calls.append(offset)
+            yield bytes(length)
+
+        agen = cache.stream("partial", size, 0, 4096, fetcher)
+        first = await agen.__anext__()
+        assert len(first) == 4096
+        await agen.aclose()  # player aborts after one small range
+
+        for _ in range(100):
+            if not cache._tasks:
+                break
+            await asyncio.sleep(0.01)
+
+        calls.clear()
+        chunks = [c async for c in cache.stream("partial", size, 0, 4096, fetcher)]
+        assert b"".join(chunks) == bytes(4096)
+        assert calls == [], "aborted range must not force a Telegram refetch"
 
     asyncio.run(scenario())
