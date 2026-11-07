@@ -214,6 +214,20 @@ rclone ls seagull:
 - 播放时自动预取后面 3 块，拖动进度条不会每次都回 Telegram 拉
 - 支持 HTTP Range、`If-Range`、`If-None-Match`，不可满足的 Range 返回 416
 
+## 速度与卡顿
+
+- **下载慢**：浏览器到 VPS 是一条 TCP 连接，跨国链路 RTT 一高，默认 cubic 拥塞控制就把单连接吞吐压在 2MB/s 上下（同一台机器开 4 条连接能跑到 6.6MB/s，说明不是 VPS 出口的问题）。在 VPS 上用 root 跑一次：
+
+  ```bash
+  bash tools/optimize-vps.sh
+  ```
+
+  它会开 BBR + fq 并放大 TCP 缓冲，单连接吞吐通常翻几倍。已建立的连接要断开重连才生效。
+
+- **视频卡顿**：播放器是按 Range 一段段要数据的，以前每个块都要等 Telegram。现在打开视频/音频时，服务端会按 `PREBUFFER_MB`（默认 128MB）在后台提前把缓存填好，后续拖动、续播直接读本地盘；预取窗口也从 3 块加到 6 块。
+- 媒体块缓存默认 4GB（`MEDIA_CACHE_GB`），命中情况看 `GET /api/status`。
+- 注意：这些只减少等待和重复下载，突破不了 VPS 出口带宽的物理上限。
+
 ## 测试
 
 ```bash
@@ -243,3 +257,7 @@ journalctl -u seagulldrive -f
 - 分享页强制 CSP，非图片/视频/音频/PDF 的分享一律 `Content-Disposition: attachment`
 - 上传分片有会话锁，避免并发写坏文件；临时文件 0600
 - WebDAV 写操作会检查 `If` 锁令牌，冲突返回 423
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。

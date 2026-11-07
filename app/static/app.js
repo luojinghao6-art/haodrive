@@ -780,9 +780,9 @@ function openPreview(file) {
     body.innerHTML = `<img src="${streamUrl(file)}" alt="">`;
   } else if (file.kind === 'video') {
     const poster = file.has_thumb ? ` poster="${BASE}/api/folders/${state.folderId}/files/${file.id}/thumb"` : '';
-    body.innerHTML = `<video src="${streamUrl(file)}" controls preload="metadata" playsinline${poster}></video>`;
+    body.innerHTML = `<video src="${streamUrl(file)}" controls preload="auto" playsinline${poster}></video>`;
   } else if (file.kind === 'audio') {
-    body.innerHTML = `<audio src="${streamUrl(file)}" controls preload="metadata"></audio>`;
+    body.innerHTML = `<audio src="${streamUrl(file)}" controls preload="auto"></audio>`;
   } else if (file.kind === 'pdf') {
     body.innerHTML = `<iframe src="${streamUrl(file)}"></iframe>`;
   } else if (file.kind === 'text') {

@@ -66,3 +66,27 @@ def test_concurrent_streams_return_correct_bytes(tmp_path):
         assert len(first) == size
 
     asyncio.run(scenario())
+
+
+def test_warm_fills_cache_ahead(tmp_path):
+    async def scenario():
+        cache = MediaCache(tmp_path / "cache", capacity_bytes=BLOCK * 8)
+        size = BLOCK * 3
+        calls = []
+
+        async def fetcher(offset, length):
+            calls.append(offset)
+            yield b"\x00" * length
+
+        task = cache.warm("warm", size, fetcher, start=0, max_bytes=BLOCK * 3)
+        assert task is not None
+        await task
+        assert cache.stats()["used"] == size
+        assert calls == [0, BLOCK, BLOCK * 2]
+
+        calls.clear()
+        chunks = [c async for c in cache.stream("warm", size, 0, 4096, fetcher)]
+        assert b"".join(chunks) == b"\x00" * 4096
+        assert calls == [], "warmed blocks must be served from disk"
+
+    asyncio.run(scenario())

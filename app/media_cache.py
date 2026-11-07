@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import AsyncIterator, Callable
 
 BLOCK = 4 * 1024 * 1024
-PREFETCH_BLOCKS = 3
-PREFETCH_CONCURRENCY = 2
+# Keep a deeper read-ahead window: video playback stalls when the browser
+# outruns the cache at a block boundary.
+PREFETCH_BLOCKS = 6
+PREFETCH_CONCURRENCY = 3
 
 
 @dataclass
@@ -48,6 +50,7 @@ class MediaCache:
         self._prefetch_slots = asyncio.Semaphore(PREFETCH_CONCURRENCY)
         self._inflight: set[tuple[str, int]] = set()
         self._block_locks: dict[tuple[str, int], asyncio.Lock] = {}
+        self._warming: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
         root.mkdir(parents=True, exist_ok=True)
         for child in root.iterdir():
@@ -223,6 +226,77 @@ class MediaCache:
             with self._mutex:
                 entry.active -= 1
 
+    def warm(
+        self,
+        key: str,
+        size: int,
+        fetcher: Callable[[int, int], AsyncIterator[bytes]],
+        start: int = 0,
+        max_bytes: int | None = None,
+    ) -> asyncio.Task | None:
+        """Fill the cache ahead of a playback position in the background.
+
+        Video players ask for ranges as they go; if each range has to wait for
+        Telegram the stream stutters. Warming a bounded window (config
+        PREBUFFER_MB) turns later range requests into local disk reads.
+        Returns the task so tests can await it; production callers ignore it.
+        """
+        entry = self._entry(key, size)
+        with self._mutex:
+            if key in self._warming:
+                return None
+            self._warming.add(key)
+            entry.active += 1
+
+        first = max(0, start // BLOCK)
+        last = self.block_count(size)
+        if max_bytes is not None:
+            last = min(last, first + max(1, (max_bytes + BLOCK - 1) // BLOCK))
+
+        async def work() -> None:
+            try:
+                for block in range(first, last):
+                    if self.entries.get(key) is not entry:
+                        return
+                    lock = self._block_locks.setdefault((key, block), asyncio.Lock())
+                    async with lock:
+                        with self._mutex:
+                            if block in entry.blocks:
+                                continue
+                            marker = (key, block)
+                            if marker in self._inflight:
+                                continue
+                            self._inflight.add(marker)
+                        try:
+                            async with self._prefetch_slots:
+                                if block in entry.blocks:
+                                    continue
+                                length = self.block_length(size, block)
+                                buffer = bytearray()
+                                async for piece in fetcher(block * BLOCK, length):
+                                    buffer.extend(piece)
+                                    if len(buffer) >= length:
+                                        break
+                                if len(buffer) >= length:
+                                    await asyncio.to_thread(
+                                        self._write_block, entry, block, bytes(buffer[:length])
+                                    )
+                        except Exception:
+                            pass
+                        finally:
+                            self._inflight.discard(marker)
+                    with self._mutex:
+                        entry.last_used = time.time()
+            finally:
+                with self._mutex:
+                    entry.active -= 1
+                    self._warming.discard(key)
+
+        task = asyncio.create_task(work())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
     def _schedule_prefetch(
         self,
         entry: Entry,
@@ -280,5 +354,6 @@ class MediaCache:
                 "misses": self.misses,
                 "evictions": self.evictions,
                 "prefetch_inflight": len(self._inflight),
+                "warming": len(self._warming),
                 "root": str(self.root),
             }

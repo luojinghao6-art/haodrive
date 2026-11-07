@@ -26,6 +26,8 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
 STREAM_CHUNK = 512 * 1024
 # Local disk cache for media blocks (video seeking, replays).
 MEDIA_CACHE_GB = float(os.getenv("MEDIA_CACHE_GB", "4"))
+# How far ahead to fill the cache when a video/audio starts playing.
+PREBUFFER_MB = int(os.getenv("PREBUFFER_MB", "128"))
 WEBDAV_USER = os.getenv("WEBDAV_USER", "seagulldrive")
 # Chunk size advertised to the web uploader.
 UPLOAD_CHUNK = int(os.getenv("UPLOAD_CHUNK", str(8 * 1024 * 1024)))

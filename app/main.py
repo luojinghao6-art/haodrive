@@ -675,10 +675,16 @@ async def media_response(folder_id: int, message_id: int, request: Request,
     if request.method == "HEAD":
         return Response(status_code=status, headers=headers, media_type=media_type)
     if backend.name == "telegram":
-        stream = media_cache.stream(
-            f"{folder_id}_{message_id}_{info.get('date', 0)}", size, start, length,
-            lambda offset, limit: backend.download_iter(folder_id, message_id, offset, limit),
-        )
+        cache_key = f"{folder_id}_{message_id}_{info.get('date', 0)}"
+        fetcher = lambda offset, limit: backend.download_iter(folder_id, message_id, offset, limit)
+        stream = media_cache.stream(cache_key, size, start, length, fetcher)
+        if inline and kind in ("video", "audio") and config.PREBUFFER_MB > 0:
+            # Playback reads ahead through ranges; warm a bounded window so the
+            # player does not stall waiting on Telegram at every block boundary.
+            media_cache.warm(
+                cache_key, size, fetcher, start=start,
+                max_bytes=config.PREBUFFER_MB * 1024 * 1024,
+            )
     else:
         stream = backend.download_iter(folder_id, message_id, start, length)
     return StreamingResponse(stream, status_code=status, headers=headers, media_type=media_type)
