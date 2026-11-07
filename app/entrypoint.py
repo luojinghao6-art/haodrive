@@ -18,7 +18,7 @@ def _prepare_data_dir() -> None:
         path = os.path.join(DATA_DIR, name)
         os.makedirs(path, exist_ok=True)
         targets.append(path)
-    for name in ("seagulldrive.db", "seagulldrive.db-wal", "seagulldrive.db-shm", "secret.key"):
+    for name in ("haodrive.db", "haodrive.db-wal", "haodrive.db-shm", "secret.key"):
         path = os.path.join(DATA_DIR, name)
         if os.path.exists(path):
             targets.append(path)

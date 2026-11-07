@@ -1,4 +1,4 @@
-"""Runtime configuration for seagulldrive."""
+"""Runtime configuration for haodrive."""
 import os
 import secrets
 import stat
@@ -20,21 +20,28 @@ DEMO_MODE = os.getenv("DEMO_MODE", "0").lower() in ("1", "true", "yes", "on")
 PROXY = os.getenv("PROXY", "").strip()
 # Largest logical file accepted (parts are stitched back into one file).
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(20 * 1024**3)))
-# Telegram rejects documents over 2GB, so larger files are split into parts
-# below this size and merged again for listing / playback / download.
-TELEGRAM_PART_BYTES = int(os.getenv("TELEGRAM_PART_BYTES", str(2_000_000_000)))
+# Telegram rejects documents over 2GB. The web client splits at this size,
+# and the server never spools more than one part to disk at a time.
+# Keep it a little under 2,000,000,000 so TMP usage stays below 2GB.
+TELEGRAM_PART_BYTES = int(os.getenv("TELEGRAM_PART_BYTES", str(1_900_000_000)))
+# Hard ceiling for everything under data/tmp (received parts + retry leftovers).
+# A new part is refused when accepting it would cross this line.
+TMP_BUDGET_BYTES = int(os.getenv("TMP_BUDGET_BYTES", str(2_000_000_000)))
 SESSION_DAYS = int(os.getenv("SESSION_DAYS", "7"))
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "").strip()
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
 # Chunk used for Telegram media range reads (must stay >= 4096).
 STREAM_CHUNK = 512 * 1024
 # Local disk cache for media blocks (video seeking, replays).
-MEDIA_CACHE_GB = float(os.getenv("MEDIA_CACHE_GB", "4"))
+MEDIA_CACHE_GB = float(os.getenv("MEDIA_CACHE_GB", "2"))
 # How far ahead to fill the cache when a video/audio starts playing.
 PREBUFFER_MB = int(os.getenv("PREBUFFER_MB", "128"))
-WEBDAV_USER = os.getenv("WEBDAV_USER", "seagulldrive")
+WEBDAV_USER = os.getenv("WEBDAV_USER", "haodrive")
 # Chunk size advertised to the web uploader.
 UPLOAD_CHUNK = int(os.getenv("UPLOAD_CHUNK", str(8 * 1024 * 1024)))
+# Cloud-drive quota shown on the dashboard. Telegram has no real quota, so
+# this is only a display denominator; 0 means "no bar, used bytes only".
+STORAGE_QUOTA_BYTES = int(os.getenv("STORAGE_QUOTA_BYTES", "0"))
 
 
 def _persisted_secret() -> str:

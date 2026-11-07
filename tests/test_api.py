@@ -1,7 +1,7 @@
 import time
 from urllib.parse import quote
 
-HEADERS = {"X-Requested-With": "seagulldrive"}
+HEADERS = {"X-Requested-With": "haodrive"}
 
 
 def _upload(client, folder_id, name, payload):

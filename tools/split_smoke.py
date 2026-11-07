@@ -23,7 +23,7 @@ PASSWORD = os.environ["SD_PASSWORD"]
 FOLDER = int(os.environ["FOLDER_ID"])
 PATH = pathlib.Path(os.environ["FILE"])
 CHUNK = int(os.environ.get("CHUNK", str(8 * 1024 * 1024)))
-HEADERS = {"X-Requested-With": "seagulldrive"}
+HEADERS = {"X-Requested-With": "haodrive"}
 jar = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 

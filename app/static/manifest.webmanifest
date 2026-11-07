@@ -1,6 +1,6 @@
 {
-  "name": "海鸥云盘",
-  "short_name": "海鸥云盘",
+  "name": "HaoDrive",
+  "short_name": "HaoDrive",
   "start_url": "../",
   "scope": "../",
   "display": "standalone",

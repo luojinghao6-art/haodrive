@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from app.main import app
 
-HEADERS = {"X-Requested-With": "seagulldrive"}
+HEADERS = {"X-Requested-With": "haodrive"}
 
 
 @pytest.fixture()

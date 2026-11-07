@@ -4,13 +4,33 @@ import hashlib
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from . import config
 
-_DB_PATH = config.DATA_DIR / "seagulldrive.db"
+_DB_PATH = config.DATA_DIR / "haodrive.db"
+
+
+def _migrate_legacy_name() -> None:
+    """Move a pre-rename database (and its WAL sidecars) into place.
+
+    Runs before the first connection, so a fresh install never creates an
+    empty haodrive.db ahead of an existing seagulldrive.db.
+    """
+    legacy = config.DATA_DIR / "seagulldrive.db"
+    if _DB_PATH.exists() or not legacy.exists():
+        return
+    for suffix in ("", "-wal", "-shm"):
+        source = Path(str(legacy) + suffix)
+        target = Path(str(_DB_PATH) + suffix)
+        if source.exists() and not target.exists():
+            source.replace(target)
+
+
+_migrate_legacy_name()
 _lock = threading.Lock()
 fernet = Fernet(
     base64.urlsafe_b64encode(hashlib.sha256(("settings:" + config.APP_SECRET).encode()).digest())
@@ -84,6 +104,43 @@ CREATE TABLE IF NOT EXISTS jobs (
     message_id INTEGER,
     error TEXT,
     created INTEGER NOT NULL,
+    updated INTEGER NOT NULL,
+    group_key TEXT,
+    part_index INTEGER,
+    part_count INTEGER
+);
+CREATE TABLE IF NOT EXISTS upload_groups (
+    group_key TEXT PRIMARY KEY,
+    folder_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    part_bytes INTEGER NOT NULL,
+    part_count INTEGER NOT NULL,
+    mime TEXT,
+    kind TEXT,
+    created INTEGER NOT NULL,
+    updated INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS upload_group_parts (
+    group_key TEXT NOT NULL,
+    part_index INTEGER NOT NULL,
+    part_size INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    message_id INTEGER,
+    updated INTEGER NOT NULL,
+    PRIMARY KEY (group_key, part_index)
+);
+CREATE TABLE IF NOT EXISTS traffic_daily (
+    day TEXT PRIMARY KEY,
+    up_bytes INTEGER NOT NULL DEFAULT 0,
+    down_bytes INTEGER NOT NULL DEFAULT 0,
+    up_files INTEGER NOT NULL DEFAULT 0,
+    down_files INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS folder_storage (
+    folder_id INTEGER PRIMARY KEY,
+    files INTEGER NOT NULL DEFAULT 0,
+    bytes INTEGER NOT NULL DEFAULT 0,
     updated INTEGER NOT NULL
 );
 """
@@ -100,10 +157,20 @@ def connect() -> sqlite3.Connection:
 def init_db() -> None:
     with _lock, connect() as conn:
         conn.executescript(SCHEMA)
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
-        if "folder_id" not in columns:
-            conn.execute("ALTER TABLE jobs ADD COLUMN folder_id INTEGER NOT NULL DEFAULT 0")
-    config.DATA_DIR.joinpath("seagulldrive.db").chmod(0o600)
+        job_columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        for name, ddl in (
+            ("folder_id", "INTEGER NOT NULL DEFAULT 0"),
+            ("group_key", "TEXT"),
+            ("part_index", "INTEGER"),
+            ("part_count", "INTEGER"),
+        ):
+            if name not in job_columns:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
+        upload_columns = {row["name"] for row in conn.execute("PRAGMA table_info(uploads)").fetchall()}
+        for name, ddl in (("group_key", "TEXT"), ("part_index", "INTEGER")):
+            if name not in upload_columns:
+                conn.execute(f"ALTER TABLE uploads ADD COLUMN {name} {ddl}")
+    _DB_PATH.chmod(0o600)
 
 
 def kv_get(key: str, default: str | None = None, secret: bool = False) -> str | None:
@@ -263,12 +330,15 @@ def move_display_name(src_folder: int, src_message: int, dst_folder: int, dst_me
 # ---- upload sessions (survive restarts) ---------------------------------
 
 def upload_save(upload_id: str, folder_id: int, name: str, size: int, received: int,
-                created: int) -> None:
+                created: int, group_key: str | None = None,
+                part_index: int | None = None) -> None:
     with _lock, connect() as conn:
         conn.execute(
-            "INSERT INTO uploads(id, folder_id, name, size, received, created) VALUES(?,?,?,?,?,?) "
-            "ON CONFLICT(id) DO UPDATE SET received=excluded.received",
-            (upload_id, folder_id, name, size, received, created),
+            "INSERT INTO uploads(id, folder_id, name, size, received, created, group_key, part_index) "
+            "VALUES(?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET received=excluded.received, "
+            "group_key=excluded.group_key, part_index=excluded.part_index",
+            (upload_id, folder_id, name, size, received, created, group_key, part_index),
         )
 
 
@@ -283,18 +353,27 @@ def upload_delete(upload_id: str) -> None:
         conn.execute("DELETE FROM uploads WHERE id=?", (upload_id,))
 
 
+def upload_delete_group(group_key: str) -> None:
+    with _lock, connect() as conn:
+        conn.execute("DELETE FROM uploads WHERE group_key=?", (group_key,))
+
+
 # ---- transfer jobs -------------------------------------------------------
 
 def job_save(job) -> None:
     now = int(time.time())
     with _lock, connect() as conn:
         conn.execute(
-            "INSERT INTO jobs(id, name, folder_id, state, sent, total, message_id, error, created, updated) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            "INSERT INTO jobs(id, name, folder_id, state, sent, total, message_id, error,"
+            " created, updated, group_key, part_index, part_count) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
             "state=excluded.state, sent=excluded.sent, total=excluded.total, "
-            "message_id=excluded.message_id, error=excluded.error, updated=excluded.updated",
+            "message_id=excluded.message_id, error=excluded.error, updated=excluded.updated, "
+            "group_key=excluded.group_key, part_index=excluded.part_index, "
+            "part_count=excluded.part_count",
             (job.id, job.name, job.folder_id, job.state, job.sent, job.total,
-             job.message_id, job.error, now, now),
+             job.message_id, job.error, now, now, getattr(job, "group_key", None),
+             getattr(job, "part_index", None), getattr(job, "part_count", None)),
         )
 
 
@@ -319,6 +398,16 @@ def job_claim_retry(job_id: str) -> bool:
         return cur.rowcount == 1
 
 
+def job_find_part(group_key: str, part_index: int) -> dict[str, Any] | None:
+    with _lock, connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE group_key=? AND part_index=? "
+            "AND state IN ('queued','running') ORDER BY created DESC LIMIT 1",
+            (group_key, part_index),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def job_unfinished() -> list[dict[str, Any]]:
     with _lock, connect() as conn:
         rows = conn.execute("SELECT * FROM jobs WHERE state IN ('queued','running')").fetchall()
@@ -340,29 +429,35 @@ def job_prune(max_age: int = 86400, keep_terminal: int = 200) -> None:
 # Telegram caps a document at 2GB. Bigger uploads are sent as consecutive
 # part messages; these tables stitch them into one logical file.
 
+def _group_save_conn(conn: sqlite3.Connection, folder_id: int, first_id: int, name: str,
+                     size: int, mime: str | None, kind: str | None,
+                     parts: list[dict[str, int]]) -> None:
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO file_groups(folder_id, first_message_id, name, size, mime, kind,"
+        " created, parts_count) VALUES(?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(folder_id, first_message_id) DO UPDATE SET name=excluded.name,"
+        " size=excluded.size, mime=excluded.mime, kind=excluded.kind,"
+        " parts_count=excluded.parts_count",
+        (folder_id, first_id, name, size, mime or "", kind or "file", now, len(parts)),
+    )
+    conn.execute(
+        "DELETE FROM file_group_parts WHERE folder_id=? AND first_message_id=?",
+        (folder_id, first_id),
+    )
+    conn.executemany(
+        "INSERT INTO file_group_parts(folder_id, message_id, first_message_id,"
+        " part_index, part_size) VALUES(?,?,?,?,?)",
+        [(folder_id, int(p["id"]), first_id, index, int(p["size"]))
+         for index, p in enumerate(parts)],
+    )
+
+
 def group_save(folder_id: int, first_id: int, name: str, size: int,
                mime: str | None, kind: str | None,
                parts: list[dict[str, int]]) -> None:
-    now = int(time.time())
     with _lock, connect() as conn:
-        conn.execute(
-            "INSERT INTO file_groups(folder_id, first_message_id, name, size, mime, kind,"
-            " created, parts_count) VALUES(?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(folder_id, first_message_id) DO UPDATE SET name=excluded.name,"
-            " size=excluded.size, mime=excluded.mime, kind=excluded.kind,"
-            " parts_count=excluded.parts_count",
-            (folder_id, first_id, name, size, mime or "", kind or "file", now, len(parts)),
-        )
-        conn.execute(
-            "DELETE FROM file_group_parts WHERE folder_id=? AND first_message_id=?",
-            (folder_id, first_id),
-        )
-        conn.executemany(
-            "INSERT INTO file_group_parts(folder_id, message_id, first_message_id,"
-            " part_index, part_size) VALUES(?,?,?,?,?)",
-            [(folder_id, int(p["id"]), first_id, index, int(p["size"]))
-             for index, p in enumerate(parts)],
-        )
+        _group_save_conn(conn, folder_id, first_id, name, size, mime, kind, parts)
 
 
 def group_get(folder_id: int, first_id: int) -> dict[str, Any] | None:
@@ -432,3 +527,202 @@ def search_groups(folder_id: int, query: str, limit: int = 200) -> list[int]:
             (folder_id, f"%{query}%", limit),
         ).fetchall()
     return [row["first_message_id"] for row in rows]
+
+# ---- pending (client-side) part uploads ----------------------------------
+# The browser splits a large file and uploads one part at a time. Until every
+# part arrives these rows keep the part messages out of the file listing.
+
+def part_group_get(group_key: str) -> dict[str, Any] | None:
+    with _lock, connect() as conn:
+        row = conn.execute("SELECT * FROM upload_groups WHERE group_key=?", (group_key,)).fetchone()
+    return dict(row) if row else None
+
+
+def part_group_create(group_key: str, folder_id: int, name: str, size: int,
+                      part_bytes: int, part_count: int, mime: str | None,
+                      kind: str | None, part_sizes: list[int]) -> dict[str, Any]:
+    now = int(time.time())
+    with _lock, connect() as conn:
+        conn.execute(
+            "INSERT INTO upload_groups(group_key, folder_id, name, size, part_bytes,"
+            " part_count, mime, kind, created, updated) VALUES(?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(group_key) DO UPDATE SET updated=excluded.updated",
+            (group_key, folder_id, name, size, part_bytes, part_count,
+             mime or "", kind or "file", now, now),
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO upload_group_parts(group_key, part_index, part_size,"
+            " state, updated) VALUES(?,?,?,'pending',?)",
+            [(group_key, index, part_sizes[index], now) for index in range(part_count)],
+        )
+    return part_group_get(group_key)  # type: ignore[return-value]
+
+
+def part_group_parts(group_key: str) -> list[dict[str, Any]]:
+    with _lock, connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM upload_group_parts WHERE group_key=? ORDER BY part_index",
+            (group_key,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def part_group_set_state(group_key: str, part_index: int, state: str,
+                         message_id: int | None = None) -> None:
+    with _lock, connect() as conn:
+        if message_id is None:
+            conn.execute(
+                "UPDATE upload_group_parts SET state=?, updated=? "
+                "WHERE group_key=? AND part_index=?",
+                (state, int(time.time()), group_key, part_index),
+            )
+        else:
+            conn.execute(
+                "UPDATE upload_group_parts SET state=?, message_id=?, updated=? "
+                "WHERE group_key=? AND part_index=?",
+                (state, message_id, int(time.time()), group_key, part_index),
+            )
+
+
+def part_group_upload_session(group_key: str, part_index: int) -> dict[str, Any] | None:
+    """Find an interrupted part session so a browser can resume its offset."""
+    with _lock, connect() as conn:
+        row = conn.execute(
+            "SELECT id, size, received FROM uploads WHERE group_key=? AND part_index=?",
+            (group_key, part_index),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def part_group_finalize(group_key: str) -> dict[str, Any] | None:
+    """Atomically register the logical file once every part is done.
+
+    Returns None when parts are still missing. For a one-part upload the
+    pending row is simply cleared: Telegram already has the file under its
+    real name, so no group overlay is needed.
+    """
+    with _lock, connect() as conn:
+        group = conn.execute(
+            "SELECT * FROM upload_groups WHERE group_key=?", (group_key,)
+        ).fetchone()
+        if not group:
+            return None
+        parts = conn.execute(
+            "SELECT * FROM upload_group_parts WHERE group_key=? ORDER BY part_index",
+            (group_key,),
+        ).fetchall()
+        if len(parts) != group["part_count"] or any(p["state"] != "done" for p in parts):
+            return None
+        if any(not p["message_id"] for p in parts):
+            return None
+        if group["part_count"] > 1:
+            first = parts[0]["message_id"]
+            ordered = [{"id": p["message_id"], "size": p["part_size"]} for p in parts]
+            _group_save_conn(conn, group["folder_id"], first, group["name"],
+                             group["size"], group["mime"], group["kind"], ordered)
+        conn.execute("DELETE FROM upload_group_parts WHERE group_key=?", (group_key,))
+        conn.execute("DELETE FROM upload_groups WHERE group_key=?", (group_key,))
+    return {"folder_id": group["folder_id"], "name": group["name"],
+            "size": group["size"], "parts": group["part_count"]}
+
+
+def part_group_delete(group_key: str) -> None:
+    with _lock, connect() as conn:
+        conn.execute("DELETE FROM upload_group_parts WHERE group_key=?", (group_key,))
+        conn.execute("DELETE FROM upload_groups WHERE group_key=?", (group_key,))
+
+
+def part_groups_unfinished() -> list[dict[str, Any]]:
+    with _lock, connect() as conn:
+        rows = conn.execute("SELECT * FROM upload_groups").fetchall()
+    return [dict(row) for row in rows]
+
+
+def pending_part_message_ids(folder_id: int) -> set[int]:
+    """Part messages already in Telegram but not yet a complete logical file."""
+    with _lock, connect() as conn:
+        rows = conn.execute(
+            "SELECT p.message_id FROM upload_group_parts p JOIN upload_groups g"
+            " ON g.group_key=p.group_key WHERE g.folder_id=? AND p.state='done'"
+            " AND p.message_id IS NOT NULL",
+            (folder_id,),
+        ).fetchall()
+    return {row["message_id"] for row in rows}
+
+
+# ---- traffic + storage counters -----------------------------------------
+
+def traffic_add(day: str, up_bytes: int = 0, down_bytes: int = 0,
+                up_files: int = 0, down_files: int = 0) -> None:
+    with _lock, connect() as conn:
+        conn.execute(
+            "INSERT INTO traffic_daily(day, up_bytes, down_bytes, up_files, down_files)"
+            " VALUES(?,?,?,?,?) ON CONFLICT(day) DO UPDATE SET "
+            "up_bytes=up_bytes+excluded.up_bytes, down_bytes=down_bytes+excluded.down_bytes,"
+            " up_files=up_files+excluded.up_files, down_files=down_files+excluded.down_files",
+            (day, up_bytes, down_bytes, up_files, down_files),
+        )
+
+
+def traffic_days(days: int = 30) -> list[dict[str, Any]]:
+    with _lock, connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM traffic_daily ORDER BY day DESC LIMIT ?", (max(1, days),)
+        ).fetchall()
+    return [dict(row) for row in reversed(rows)]
+
+
+def traffic_totals() -> dict[str, int]:
+    with _lock, connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(up_bytes),0) AS up, COALESCE(SUM(down_bytes),0) AS down,"
+            " COALESCE(SUM(up_files),0) AS up_files, COALESCE(SUM(down_files),0) AS down_files"
+            " FROM traffic_daily"
+        ).fetchone()
+    return {"up": row["up"], "down": row["down"],
+            "up_files": row["up_files"], "down_files": row["down_files"]}
+
+
+def _storage_add_conn(conn: sqlite3.Connection, folder_id: int, files: int, size: int) -> None:
+    conn.execute(
+        "INSERT INTO folder_storage(folder_id, files, bytes, updated) VALUES(?,?,?,?) "
+        "ON CONFLICT(folder_id) DO UPDATE SET files=files+excluded.files,"
+        " bytes=bytes+excluded.bytes, updated=excluded.updated",
+        (folder_id, files, size, int(time.time())),
+    )
+    conn.execute(
+        "UPDATE folder_storage SET files=MAX(files,0), bytes=MAX(bytes,0) WHERE folder_id=?",
+        (folder_id,),
+    )
+
+
+def storage_add(folder_id: int, files: int, size: int) -> None:
+    with _lock, connect() as conn:
+        _storage_add_conn(conn, folder_id, files, size)
+
+
+def storage_move(src_folder: int, dst_folder: int, files: int, size: int) -> None:
+    with _lock, connect() as conn:
+        _storage_add_conn(conn, src_folder, -files, -size)
+        _storage_add_conn(conn, dst_folder, files, size)
+
+
+def storage_remove_folder(folder_id: int) -> None:
+    with _lock, connect() as conn:
+        conn.execute("DELETE FROM folder_storage WHERE folder_id=?", (folder_id,))
+
+
+def storage_rows() -> dict[int, dict[str, Any]]:
+    with _lock, connect() as conn:
+        rows = conn.execute("SELECT * FROM folder_storage").fetchall()
+    return {row["folder_id"]: dict(row) for row in rows}
+
+
+def storage_replace_all(rows: list[tuple[int, int, int]]) -> None:
+    """Reconcile after a full scan: (folder_id, files, bytes)."""
+    with _lock, connect() as conn:
+        conn.execute("DELETE FROM folder_storage")
+        conn.executemany(
+            "INSERT INTO folder_storage(folder_id, files, bytes, updated) VALUES(?,?,?,?)",
+            [(folder_id, files, size, int(time.time())) for folder_id, files, size in rows],
+        )

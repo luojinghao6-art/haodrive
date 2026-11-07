@@ -22,9 +22,9 @@ from telethon.tl.types import (
     DocumentAttributeVideo,
 )
 
-from . import config, db
+from . import config, db, parts
 
-logger = logging.getLogger("seagulldrive.tg")
+logger = logging.getLogger("haodrive.tg")
 
 FOLDER_MARK = "[TD]"
 FOLDER_ABOUT = "Telegram Drive Storage Folder\n[telegram-drive-folder]"
@@ -118,6 +118,9 @@ class UploadJob:
     total: int = 0
     message_id: int | None = None
     error: str | None = None
+    group_key: str | None = None
+    part_index: int | None = None
+    part_count: int | None = None
 
 
 def _kind_from_mime(mime: str) -> str:
@@ -265,8 +268,8 @@ class TelegramBackend:
                 proxy=_proxy_arg(),
                 connection_retries=5,
                 auto_reconnect=True,
-                app_version="seagulldrive 1.0",
-                device_model="seagulldrive",
+                app_version="haodrive 1.0",
+                device_model="haodrive",
                 system_version="Linux",
             )
             await client.connect()
@@ -309,9 +312,9 @@ class TelegramBackend:
             api_id,
             api_hash,
             proxy=_proxy_arg(),
-            device_model="seagulldrive",
+            device_model="haodrive",
             system_version="Linux",
-            app_version="seagulldrive 1.0",
+            app_version="haodrive 1.0",
         )
 
     async def begin_login(self, api_id: int, api_hash: str, phone: str) -> dict[str, Any]:
@@ -468,6 +471,7 @@ class TelegramBackend:
         except Exception as error:
             raise BackendError(friendly_error(error))
         db.remove_folder(folder_id)
+        db.storage_remove_folder(folder_id)
         self._entities.pop(folder_id, None)
 
     # ---- files -----------------------------------------------------------
@@ -501,6 +505,9 @@ class TelegramBackend:
         # held fewer media messages than the limit.
         # Local display-name overlay: Telegram cannot rename, so the web app
         # keeps its own name for each message.
+        pending = db.pending_part_message_ids(folder_id)
+        if pending:
+            items = [item for item in items if item["id"] not in pending]
         groups, hidden = db.groups_for_folder(folder_id)
         if groups:
             items = [item for item in items if item["id"] not in hidden]
@@ -566,6 +573,8 @@ class TelegramBackend:
         return message
 
     async def file_info(self, folder_id: int, message_id: int) -> dict[str, Any]:
+        if message_id in db.pending_part_message_ids(folder_id):
+            raise BackendError("文件还没上传完", 404)
         group = db.group_by_message(folder_id, message_id)
         target = group["first_message_id"] if group else message_id
         info = describe(await self._message(folder_id, target))
@@ -651,14 +660,31 @@ class TelegramBackend:
         cache.write_bytes(payload)
         return payload
 
+    async def delete_messages_only(self, folder_id: int, ids: list[int]) -> None:
+        """Delete raw messages without touching the logical storage counters."""
+        if not ids:
+            return
+        client = self._client()
+        entity = await self._entity(folder_id)
+        try:
+            await client.delete_messages(entity, ids)
+        except Exception as error:
+            raise BackendError(friendly_error(error))
+        for message_id in ids:
+            self._msg_cache.pop((folder_id, message_id), None)
+            db.clear_display_name(folder_id, message_id)
+
     async def delete_file(self, folder_id: int, message_id: int) -> None:
         client = self._client()
         entity = await self._entity(folder_id)
         group = db.group_by_message(folder_id, message_id)
         if group:
             ids = [p["message_id"] for p in db.group_parts(folder_id, group["first_message_id"])]
+            logical_size = int(group["size"])
         else:
             ids = [message_id]
+            info = describe(await self._message(folder_id, message_id))
+            logical_size = int(info["size"])
         try:
             await client.delete_messages(entity, ids)
         except Exception as error:
@@ -668,6 +694,7 @@ class TelegramBackend:
             db.clear_display_name(folder_id, part_id)
         if group:
             db.group_delete(folder_id, group["first_message_id"])
+        db.storage_add(folder_id, -1, -logical_size)
 
     async def move_file(self, src_folder: int, message_id: int, dst_folder: int) -> int | None:
         client = self._client()
@@ -694,7 +721,9 @@ class TelegramBackend:
                 db.move_display_name(src_folder, group["first_message_id"], dst_folder, new_ids[0])
                 for part_id in ids:
                     self._msg_cache.pop((src_folder, part_id), None)
+                db.storage_move(src_folder, dst_folder, 1, int(group["size"]))
                 return new_ids[0]
+            info = describe(await self._message(src_folder, message_id))
             forwarded = await client.forward_messages(dst, message_id, src)
             new_id = forwarded_id(forwarded)
             if not new_id:
@@ -703,6 +732,7 @@ class TelegramBackend:
             if new_id:
                 db.move_display_name(src_folder, message_id, dst_folder, new_id)
             self._msg_cache.pop((src_folder, message_id), None)
+            db.storage_move(src_folder, dst_folder, 1, int(info["size"]))
             return new_id
         except Exception as error:
             raise BackendError(friendly_error(error))
@@ -732,12 +762,16 @@ class TelegramBackend:
                 ).get(group["first_message_id"])
                 if override:
                     db.set_display_name(dst_folder, new_ids[0], override)
+                db.storage_add(dst_folder, 1, int(group["size"]))
                 return new_ids[0]
+            info = describe(await self._message(src_folder, message_id))
             forwarded = await client.forward_messages(dst, message_id, src)
             new_id = forwarded_id(forwarded)
             override = db.display_names(src_folder, [message_id]).get(message_id)
             if new_id and override:
                 db.set_display_name(dst_folder, new_id, override)
+            if new_id:
+                db.storage_add(dst_folder, 1, int(info["size"]))
             return new_id
         except Exception as error:
             raise BackendError(friendly_error(error))
@@ -821,6 +855,35 @@ class TelegramBackend:
         info.update({"name": name, "size": size, "mime": mime, "kind": kind, "parts": count})
         return info
 
+    async def upload_part(self, folder_id: int, path: Path, name: str,
+                          part_index: int, part_count: int = 0,
+                          progress: Callable[[int, int], None] | None = None) -> dict[str, Any]:
+        """Send exactly one already-sliced part as one Telegram document."""
+        client = self._client()
+        entity = await self._entity(folder_id)
+        size = os.path.getsize(path)
+        single = part_count == 1
+        part_name = name if single else f"{name}.part{part_index + 1:03d}"
+        if single:
+            caption = ""
+        elif part_count and part_count > 0:
+            caption = f"[TD-PART {part_index + 1}/{part_count}]"
+        else:
+            caption = f"[TD-PART {part_index + 1}]"
+        try:
+            uploaded = await client.upload_file(
+                str(path), part_size_kb=512, file_size=size, file_name=part_name,
+                progress_callback=(lambda cur, total: progress(cur, total) if progress else None),
+            )
+            message = await client.send_file(
+                entity, uploaded, force_document=True,
+                attributes=[DocumentAttributeFilename(file_name=part_name)],
+                caption=caption,
+            )
+        except Exception as error:
+            raise BackendError(friendly_error(error))
+        return describe(message)
+
     # ---- upload queue ----------------------------------------------------
 
     async def enqueue_upload(self, job: UploadJob) -> UploadJob:
@@ -847,12 +910,27 @@ class TelegramBackend:
                         def report(sent: int, total: int) -> None:
                             job.sent, job.total = sent, total
 
-                        info = await self.upload(job.folder_id, path, job.name, report)
-                        job.message_id = info["id"]
-                        job.sent = job.total or job.sent
-                        job.state = "done"
-                        db.job_save(job)
-                        logger.info("upload done: %s -> message %s", job.name, job.message_id)
+                        if job.group_key is not None and job.part_index is not None:
+                            info = await self.upload_part(
+                                job.folder_id, path, job.name, job.part_index,
+                                job.part_count or 0, report,
+                            )
+                            job.message_id = info["id"]
+                            job.sent = job.total or job.sent
+                            job.state = "done"
+                            db.job_save(job)
+                            parts.finish_part(job.group_key, job.part_index, info["id"],
+                                              info["size"])
+                            logger.info("part %s/%s done: %s -> message %s", job.part_index + 1,
+                                        job.part_count or "?", job.name, job.message_id)
+                        else:
+                            info = await self.upload(job.folder_id, path, job.name, report)
+                            job.message_id = info["id"]
+                            job.sent = job.total or job.sent
+                            job.state = "done"
+                            db.job_save(job)
+                            parts.record_logical_upload(job.folder_id, info["size"])
+                            logger.info("upload done: %s -> message %s", job.name, job.message_id)
                         break
                     except asyncio.CancelledError:
                         job.state = "error"
@@ -877,6 +955,14 @@ class TelegramBackend:
                         path.unlink()
                     except OSError:
                         pass
+                elif job.group_key is not None and job.part_index is not None:
+                    # A failed part is re-uploaded from scratch; keeping its
+                    # temp file would eat the 2GB budget forever.
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                    db.part_group_set_state(job.group_key, job.part_index, "pending")
                 self._upload_queue.task_done()
 
 

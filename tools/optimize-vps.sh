@@ -17,7 +17,7 @@ else
     CC_LINE="net.ipv4.tcp_congestion_control=bbr"
 fi
 
-cat > /etc/sysctl.d/99-seagulldrive-net.conf <<CONF
+cat > /etc/sysctl.d/99-haodrive-net.conf <<CONF
 net.core.default_qdisc=fq
 ${CC_LINE}
 net.core.rmem_max=134217728

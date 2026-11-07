@@ -24,7 +24,7 @@ from xml.sax.saxutils import escape
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
 
-from . import config, db
+from . import config, db, parts
 from .http_range import RangeNotSatisfiable, parse_range
 from .tg_backend import BackendError
 
@@ -70,7 +70,7 @@ def _unauthorized() -> Response:
     return Response(
         status_code=401,
         content="Unauthorized",
-        headers={"WWW-Authenticate": 'Basic realm="seagulldrive"'},
+        headers={"WWW-Authenticate": 'Basic realm="haodrive"'},
     )
 
 
@@ -321,7 +321,7 @@ async def proppatch(request: Request, path: str = "") -> Response:
 
 
 async def _stream_file(request: Request, folder: dict[str, Any], item: dict[str, Any], body: bool) -> Response:
-    from .main import backend, media_cache
+    from .main import backend, counting_stream, media_cache
 
     size = int(item["size"])
     etag = f'"{item["id"]}-{size}"'
@@ -362,7 +362,8 @@ async def _stream_file(request: Request, folder: dict[str, Any], item: dict[str,
         )
     else:
         stream = backend.download_iter(folder["id"], item["id"], start, length)
-    return StreamingResponse(stream, status_code=206 if parsed else 200, headers=headers)
+    return StreamingResponse(counting_stream(stream), status_code=206 if parsed else 200,
+                             headers=headers)
 
 
 @router.api_route("/{path:path}", methods=["GET", "HEAD"])
@@ -384,11 +385,11 @@ async def put_file(request: Request, path: str = "") -> Response:
         return _unauthorized()
     from .main import backend
 
-    parts = _split(path)
-    if len(parts) != 2:
+    pieces = _split(path)
+    if len(pieces) != 2:
         return Response(status_code=409, content="PUT needs /<folder>/<file>")
     folders = await _folders()
-    folder = _folder_by_name(folders, parts[0])
+    folder = _folder_by_name(folders, pieces[0])
     if folder is None:
         return Response(status_code=409, content="Folder does not exist")
 
@@ -402,32 +403,20 @@ async def put_file(request: Request, path: str = "") -> Response:
 
     existing = None
     for item in await _folder_files(folder["id"]):
-        if item["name"] == parts[1]:
+        if item["name"] == pieces[1]:
             existing = item
             break
 
-    temp = config.TMP_DIR / f"dav_{uuid.uuid4().hex}"
-    total = 0
-    try:
-        with temp.open("wb") as handle:
-            os.chmod(temp, 0o600)
-            async for chunk in request.stream():
-                total += len(chunk)
-                if total > config.MAX_UPLOAD_BYTES:
-                    return Response(status_code=413, content="File too large")
-                await asyncio.to_thread(handle.write, chunk)
-        # Upload first: a failed upload must never destroy the old file.
-        info = await backend.upload(folder["id"], temp, parts[1])
-        if existing and existing.get("id") != info.get("id"):
-            await backend.delete_file(folder["id"], existing["id"])
-        _invalidate_media(folder["id"], existing)
-        _invalidate_media(folder["id"], info)
-        invalidate(folder["id"])
-    finally:
-        try:
-            temp.unlink()
-        except OSError:
-            pass
+    hint = int(declared) if declared and declared.isdigit() else 0
+    # Rolling spool: one Telegram-sized part at a time, never the whole file.
+    # Upload first: a failed upload must never destroy the old file.
+    info = await parts.upload_stream(backend, folder["id"], pieces[1],
+                                     request.stream(), total_hint=hint)
+    if existing and existing.get("id") != info.get("id"):
+        await backend.delete_file(folder["id"], existing["id"])
+    _invalidate_media(folder["id"], existing)
+    _invalidate_media(folder["id"], info)
+    invalidate(folder["id"])
     return Response(status_code=204 if existing else 201)
 
 

@@ -10,8 +10,8 @@ import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
-from . import config, db
-from .tg_backend import BackendError, UploadJob, _kind_from_mime  # noqa: F401  (see below)
+from . import config, db, parts
+from .tg_backend import BackendError, UploadJob, _kind_from_mime, plan_parts  # noqa: F401  (see below)
 
 
 ROOT = config.DATA_DIR / "demo"
@@ -93,6 +93,16 @@ class DemoBackend:
         _ensure()
         paths = sorted((p for p in ROOT.iterdir() if p.is_file()), key=lambda p: p.stat().st_mtime, reverse=True)
         items = [_describe(folder_id, p) for p in paths]
+        pending = db.pending_part_message_ids(folder_id)
+        groups, hidden = db.groups_for_folder(folder_id)
+        items = [i for i in items if i["id"] not in pending and i["id"] not in hidden]
+        for item in items:
+            group = groups.get(item["id"])
+            if group:
+                item.update({"size": group["size"], "name": group["name"],
+                             "mime": group["mime"] or item["mime"],
+                             "kind": group["kind"] or item["kind"],
+                             "parts": group["parts_count"]})
         names = db.display_names(folder_id, [item["id"] for item in items])
         for item in items:
             if item["id"] in names:
@@ -102,14 +112,41 @@ class DemoBackend:
         return {"items": items[offset:offset + limit], "next_offset": 0}
 
     async def file_info(self, folder_id: int, message_id: int) -> dict[str, Any]:
-        info = _describe(folder_id, self._path_for(message_id))
-        override = db.display_names(folder_id, [message_id]).get(message_id)
+        if message_id in db.pending_part_message_ids(folder_id):
+            raise BackendError("文件还没上传完", 404)
+        group = db.group_by_message(folder_id, message_id)
+        target = group["first_message_id"] if group else message_id
+        info = _describe(folder_id, self._path_for(target))
+        if group:
+            info.update({"size": group["size"], "name": group["name"],
+                         "mime": group["mime"] or info["mime"],
+                         "kind": group["kind"] or info["kind"],
+                         "parts": group["parts_count"]})
+        override = db.display_names(folder_id, [target]).get(target)
         if override:
             info["name"] = override
         return info
 
     async def download_iter(self, folder_id: int, message_id: int, offset: int = 0,
                             length: int | None = None) -> AsyncIterator[bytes]:
+        group = db.group_by_message(folder_id, message_id)
+        if group and group["parts_count"] > 1:
+            parts = db.group_parts(folder_id, group["first_message_id"])
+            if length is None:
+                length = max(0, group["size"] - offset)
+            for part_id, part_offset, take in plan_parts(parts, offset, length):
+                path = self._path_for(part_id)
+                with path.open("rb") as handle:
+                    handle.seek(part_offset)
+                    remaining = take
+                    while remaining > 0:
+                        chunk = handle.read(min(256 * 1024, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                        yield chunk
+                        await asyncio.sleep(0)
+            return
         path = self._path_for(message_id)
         size = path.stat().st_size
         length = size - offset if length is None else min(length, size - offset)
@@ -130,9 +167,28 @@ class DemoBackend:
             return path.read_bytes()
         return None
 
+    async def delete_messages_only(self, folder_id: int, ids: list[int]) -> None:
+        for message_id in ids:
+            try:
+                self._path_for(message_id).unlink(missing_ok=True)
+            except BackendError:
+                pass
+            db.clear_display_name(folder_id, message_id)
+
     async def delete_file(self, folder_id: int, message_id: int) -> None:
+        group = db.group_by_message(folder_id, message_id)
+        if group:
+            ids = [p["message_id"] for p in db.group_parts(folder_id, group["first_message_id"])]
+            for part_id in ids:
+                self._path_for(part_id).unlink(missing_ok=True)
+                db.clear_display_name(folder_id, part_id)
+            db.group_delete(folder_id, group["first_message_id"])
+            db.storage_add(folder_id, -1, -int(group["size"]))
+            return
+        size = self._path_for(message_id).stat().st_size
         self._path_for(message_id).unlink()
         db.clear_display_name(folder_id, message_id)
+        db.storage_add(folder_id, -1, -size)
 
     async def move_file(self, src_folder: int, message_id: int, dst_folder: int) -> None:
         raise BackendError("demo 模式只有一个文件夹", 400)
@@ -160,13 +216,34 @@ class DemoBackend:
             progress(total, total)
         return _describe(folder_id, target)
 
+    async def upload_part(self, folder_id: int, path: Path, name: str,
+                          part_index: int, part_count: int = 0,
+                          progress: Callable[[int, int], None] | None = None) -> dict[str, Any]:
+        _ensure()
+        part_name = name if part_count == 1 else f"{name}.part{part_index + 1:03d}"
+        target = ROOT / Path(part_name).name
+        total = path.stat().st_size
+        shutil.copyfile(path, target)
+        if progress:
+            progress(total, total)
+        return _describe(folder_id, target)
+
     async def enqueue_upload(self, job: UploadJob) -> UploadJob:
         self.jobs[job.id] = job
         try:
             job.state = "running"
-            info = await self.upload(job.folder_id, config.TMP_DIR / job.id, job.name,
-                                     lambda sent, total: setattr(job, "sent", sent) or setattr(job, "total", total))
-            job.message_id = info["id"]
+            path = config.TMP_DIR / job.id
+            if job.group_key is not None and job.part_index is not None:
+                info = await self.upload_part(
+                    job.folder_id, path, job.name, job.part_index, job.part_count or 0,
+                    lambda sent, total: setattr(job, "sent", sent) or setattr(job, "total", total))
+                job.message_id = info["id"]
+                parts.finish_part(job.group_key, job.part_index, info["id"], info["size"])
+            else:
+                info = await self.upload(job.folder_id, path, job.name,
+                                         lambda sent, total: setattr(job, "sent", sent) or setattr(job, "total", total))
+                job.message_id = info["id"]
+                parts.record_logical_upload(job.folder_id, info["size"])
             job.state = "done"
         except Exception as error:
             job.state = "error"

@@ -3,22 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>海鸥云盘</title>
+<title>HaoDrive</title>
 <link rel="manifest" href="static/manifest.webmanifest">
 <meta name="theme-color" content="#0e1014">
-<link rel="stylesheet" href="static/style.css?v=9">
+<link rel="stylesheet" href="static/style.css?v=13">
 </head>
 <body>
 <div id="app">
   <!-- login -->
   <section id="view-login" class="center-view hidden">
     <div class="card auth-card">
+      <button class="ghost icon lang-toggle" data-i18n-title="语言" aria-label="Language">EN</button>
       <div class="logo">☁️</div>
-      <h1>海鸥云盘</h1>
-      <p class="muted">Telegram 频道当硬盘，自己部署自己用</p>
+      <h1>HaoDrive</h1>
+      <p class="muted" data-i18n="Telegram 频道当硬盘，自己部署自己用">Telegram 频道当硬盘，自己部署自己用</p>
       <form id="login-form">
-        <input type="password" id="login-password" placeholder="管理密码" autocomplete="current-password" required>
-        <button class="primary" type="submit">进入</button>
+        <input type="password" id="login-password" data-i18n-placeholder="管理密码" placeholder="管理密码" autocomplete="current-password" required>
+        <button class="primary" type="submit" data-i18n="进入">进入</button>
       </form>
       <p class="err" id="login-err"></p>
     </div>
@@ -27,22 +28,23 @@
   <!-- telegram setup -->
   <section id="view-setup" class="center-view hidden">
     <div class="card auth-card wide">
-      <h1>连接 Telegram</h1>
-      <p class="muted">到 <a href="https://my.telegram.org" target="_blank" rel="noopener">my.telegram.org</a> →
+      <button class="ghost icon lang-toggle" data-i18n-title="语言" aria-label="Language">EN</button>
+      <h1 data-i18n="连接 Telegram">连接 Telegram</h1>
+      <p class="muted" data-i18n-html="到 my.telegram.org → API development tools 建一个应用，拿 api_id / api_hash。手机号要带国家码，比如 +8613800000000。">到 <a href="https://my.telegram.org" target="_blank" rel="noopener">my.telegram.org</a> →
         API development tools 建一个应用，拿 api_id / api_hash。手机号要带国家码，比如 +8613800000000。</p>
       <div id="setup-step-1">
         <label>api_id <input id="api-id" inputmode="numeric" placeholder="12345678"></label>
         <label>api_hash <input id="api-hash" placeholder="0123456789abcdef0123456789abcdef"></label>
-        <label>手机号 <input id="api-phone" placeholder="+8613800000000"></label>
-        <button class="primary" id="btn-send-code">发送验证码</button>
+        <label><span data-i18n="手机号">手机号</span> <input id="api-phone" placeholder="+8613800000000"></label>
+        <button class="primary" id="btn-send-code" data-i18n="发送验证码">发送验证码</button>
       </div>
       <div id="setup-step-2" class="hidden">
-        <label>验证码 <input id="login-code" inputmode="numeric" autocomplete="one-time-code" placeholder="12345"></label>
-        <button class="primary" id="btn-submit-code">提交</button>
+        <label><span data-i18n="验证码">验证码</span> <input id="login-code" inputmode="numeric" autocomplete="one-time-code" placeholder="12345"></label>
+        <button class="primary" id="btn-submit-code" data-i18n="提交">提交</button>
       </div>
       <div id="setup-step-3" class="hidden">
-        <label>两步验证密码 <input id="login-2fa" type="password" placeholder="Two-step password"></label>
-        <button class="primary" id="btn-submit-2fa">提交</button>
+        <label><span data-i18n="两步验证密码">两步验证密码</span> <input id="login-2fa" type="password" data-i18n-placeholder="两步验证密码" placeholder="Two-step password"></label>
+        <button class="primary" id="btn-submit-2fa" data-i18n="提交">提交</button>
       </div>
       <p class="err" id="setup-err"></p>
       <p class="muted small" id="setup-note"></p>
@@ -52,52 +54,116 @@
   <!-- main -->
   <section id="view-main" class="hidden">
     <aside id="sidebar">
-      <div class="brand"><span class="logo-sm">☁️</span> 海鸥云盘</div>
-      <button class="ghost full" id="btn-new-folder">＋ 新建文件夹</button>
+      <div class="brand"><span class="logo-sm">☁️</span> HaoDrive</div>
+      <button class="ghost full" id="btn-new-folder" data-i18n="新建文件夹">＋ 新建文件夹</button>
       <nav id="folder-list"></nav>
       <div class="sidebar-foot">
         <div id="account-line" class="muted small"></div>
-        <button class="ghost full" id="btn-shares">我的分享</button>
-        <button class="ghost full" id="btn-settings">WebDAV 挂载</button>
-        <button class="ghost full" id="btn-tg-logout">断开 Telegram</button>
-        <button class="ghost full" id="btn-logout">退出登录</button>
+        <button class="ghost full" id="btn-stats" data-i18n="概览">概览</button>
+        <button class="ghost full" id="btn-shares" data-i18n="我的分享">我的分享</button>
+        <button class="ghost full" id="btn-settings" data-i18n="WebDAV 挂载">WebDAV 挂载</button>
+        <button class="ghost full" id="btn-tg-logout" data-i18n="断开 Telegram">断开 Telegram</button>
+        <button class="ghost full" id="btn-logout" data-i18n="退出登录">退出登录</button>
+        <button class="ghost full lang-toggle" data-i18n-title="语言" aria-label="Language">EN</button>
       </div>
     </aside>
 
     <main id="content">
       <header id="topbar">
-        <button class="ghost icon" id="btn-menu" aria-label="菜单">☰</button>
-        <h2 id="folder-title">文件</h2>
+        <button class="ghost icon" id="btn-menu" data-i18n-aria="菜单" aria-label="菜单">☰</button>
+        <h2 id="folder-title" data-i18n="文件">文件</h2>
         <div class="spacer"></div>
-        <button class="ghost icon" id="btn-share-folder" title="分享文件夹">📤</button>
-        <button class="ghost icon" id="btn-select" title="多选">☑</button>
-        <input id="search" type="search" placeholder="搜索文件名">
-        <label class="btn primary" id="btn-upload-label">
-          上传 <input id="file-input" type="file" multiple>
-        </label>
+        <div id="topbar-files">
+          <button class="ghost icon" id="btn-share-folder" data-i18n-title="分享文件夹" title="分享文件夹">📤</button>
+          <button class="ghost icon" id="btn-select" data-i18n-title="多选" title="多选">☑</button>
+          <input id="search" type="search" data-i18n-placeholder="搜索文件名" placeholder="搜索文件名">
+          <label class="btn primary" id="btn-upload-label">
+            <span data-i18n="上传">上传</span> <input id="file-input" type="file" multiple>
+          </label>
+        </div>
       </header>
 
       <div id="batch-bar" class="hidden">
         <span id="batch-count">已选 0 项</span>
-        <button class="ghost" id="batch-download">下载</button>
-        <button class="ghost" id="batch-move">移动</button>
-        <button class="ghost danger" id="batch-delete">删除</button>
-        <button class="ghost" id="batch-cancel">取消</button>
+        <button class="ghost" id="batch-download" data-i18n="下载">下载</button>
+        <button class="ghost" id="batch-move" data-i18n="移动">移动</button>
+        <button class="ghost" id="batch-delete" data-i18n="删除">删除</button>
+        <button class="ghost" id="batch-cancel" data-i18n="取消">取消</button>
       </div>
 
-      <div id="drop-hint" class="hidden">松开上传到当前文件夹</div>
-      <div id="file-grid"></div>
-      <div id="empty" class="hidden">
-        <p>这里还是空的。</p>
-        <p class="muted">把文件拖进来，或者点右上角「上传」。</p>
+      <div id="drop-hint" class="hidden" data-i18n="松开上传到当前文件夹">松开上传到当前文件夹</div>
+
+      <div id="files-page">
+        <div id="file-grid"></div>
+        <div id="empty" class="hidden">
+          <p data-i18n="这里还是空的。">这里还是空的。</p>
+          <p class="muted" data-i18n="把文件拖进来，或者点右上角「上传」。">把文件拖进来，或者点右上角「上传」。</p>
+        </div>
+        <div id="load-more" class="hidden"><button class="ghost" id="btn-load-more" data-i18n="加载更多">加载更多</button></div>
       </div>
-      <div id="load-more" class="hidden"><button class="ghost" id="btn-load-more">加载更多</button></div>
+
+      <section id="stats-page" class="hidden">
+        <div class="stat-grid">
+          <article class="stat-tile">
+            <span class="stat-label" data-i18n="已用空间">已用空间</span>
+            <strong id="stat-used">—</strong>
+            <div class="meter" aria-hidden="true"><span id="stat-meter"></span></div>
+            <span class="small muted" id="stat-quota"></span>
+          </article>
+          <article class="stat-tile">
+            <span class="stat-label" data-i18n="累计上传">累计上传</span>
+            <strong id="stat-up">—</strong>
+            <span class="small muted" id="stat-up-files"></span>
+          </article>
+          <article class="stat-tile">
+            <span class="stat-label" data-i18n="累计下载">累计下载</span>
+            <strong id="stat-down">—</strong>
+            <span class="small muted" id="stat-down-files"></span>
+          </article>
+          <article class="stat-tile">
+            <span class="stat-label" data-i18n="服务器磁盘">服务器磁盘</span>
+            <strong id="stat-disk">—</strong>
+            <span class="small muted" id="stat-disk-free"></span>
+          </article>
+        </div>
+
+        <article class="card chart-card">
+          <div class="chart-head">
+            <div>
+              <h3 data-i18n="上传/下载流量">上传/下载流量</h3>
+              <p class="small muted" id="stats-today"></p>
+            </div>
+            <div class="chart-controls">
+              <select id="stats-days">
+                <option value="7" data-i18n="近 7 天">近 7 天</option>
+                <option value="30" selected data-i18n="近 30 天">近 30 天</option>
+                <option value="90" data-i18n="近 90 天">近 90 天</option>
+              </select>
+              <button class="ghost icon" id="stats-refresh" data-i18n-title="刷新" title="刷新">↻</button>
+            </div>
+          </div>
+          <div class="legend" id="traffic-legend">
+            <span><i class="swatch up"></i><span data-i18n="上传">上传</span></span>
+            <span><i class="swatch down"></i><span data-i18n="下载">下载</span></span>
+          </div>
+          <div id="traffic-chart" class="chart"></div>
+          <details class="chart-table"><summary data-i18n="数据表">数据表</summary><div id="traffic-table"></div></details>
+        </article>
+
+        <article class="card">
+          <div class="chart-head">
+            <h3 data-i18n="文件夹占用">文件夹占用</h3>
+            <span class="small muted" id="stats-updated"></span>
+          </div>
+          <div id="folder-bars" class="folder-bars"></div>
+        </article>
+      </section>
     </main>
   </section>
 
-  <!-- upload panel -->
+  <!-- transfers -->
   <div id="upload-panel" class="hidden">
-    <div class="panel-head"><span>上传队列</span><button class="ghost icon" id="btn-close-uploads">×</button></div>
+    <div class="panel-head"><span data-i18n="传输队列">传输队列</span><button class="ghost icon" id="btn-close-uploads">×</button></div>
     <div id="upload-list"></div>
   </div>
 
@@ -106,8 +172,8 @@
     <div class="preview-body" id="preview-body"></div>
     <div class="preview-bar">
       <span id="preview-name"></span>
-      <a class="btn ghost" id="preview-download" href="#" download>下载</a>
-      <button class="btn ghost" id="preview-close">关闭</button>
+      <a class="btn ghost" id="preview-download" href="#" download data-i18n="下载">下载</a>
+      <button class="btn ghost" id="preview-close" data-i18n="关闭">关闭</button>
     </div>
   </div>
 
@@ -119,6 +185,7 @@
   <div id="sidebar-backdrop" class="hidden"></div>
   <div id="toasts"></div>
 </div>
-<script src="static/app.js?v=9"></script>
+<script src="static/i18n.js?v=13"></script>
+<script src="static/app.js?v=13"></script>
 </body>
 </html>

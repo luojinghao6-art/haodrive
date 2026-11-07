@@ -1,7 +1,8 @@
-"""FastAPI application for seagulldrive (VPS Telegram cloud drive)."""
+"""FastAPI application for haodrive (VPS Telegram cloud drive)."""
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import mimetypes
 import os
@@ -23,7 +24,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db, security, webdav
+from . import config, db, i18n, parts, security, traffic, webdav
 from .demo_backend import DemoBackend
 from .http_range import RangeNotSatisfiable, if_range_matches, parse_range
 from .media_cache import MediaCache
@@ -33,15 +34,15 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
-logger = logging.getLogger("seagulldrive")
+logger = logging.getLogger("haodrive")
 
-app = FastAPI(title="seagulldrive", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="haodrive", docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 app.include_router(webdav.router, prefix="/dav")
 
 backend = DemoBackend() if config.DEMO_MODE else TelegramBackend()
 media_cache = MediaCache(config.CACHE_DIR / "media", int(config.MEDIA_CACHE_GB * 1024**3))
-SHARE_COOKIE = "sd_share"
+SHARE_COOKIE = "hd_share"
 UPLOAD_SESSIONS: dict[str, dict[str, Any]] = {}
 UPLOAD_LOCKS: dict[str, asyncio.Lock] = {}
 MAX_UPLOAD_SESSIONS = 32
@@ -74,9 +75,20 @@ def _restore_uploads() -> None:
             db.upload_delete(upload_id)
             continue
         received = min(int(row["received"]), actual)
+        group_key = row.get("group_key")
+        part_index = row.get("part_index")
+        if group_key is not None:
+            group = db.part_group_get(group_key)
+            part = next((p for p in db.part_group_parts(group_key)
+                         if p["part_index"] == part_index), None) if group else None
+            if not group or not part or part["state"] == "done":
+                path.unlink(missing_ok=True)
+                db.upload_delete(upload_id)
+                continue
         UPLOAD_SESSIONS[upload_id] = {
             "folder_id": row["folder_id"], "name": row["name"], "size": row["size"],
             "path": path, "received": received, "created": row["created"],
+            "group_key": group_key, "part_index": part_index,
         }
         UPLOAD_LOCKS[upload_id] = asyncio.Lock()
         known.add(upload_id)
@@ -96,29 +108,100 @@ async def _restore_jobs() -> None:
         path = config.TMP_DIR / row["id"]
         if path.exists():
             job = UploadJob(id=row["id"], name=row["name"], folder_id=row["folder_id"],
-                            total=row["total"] or path.stat().st_size)
+                            total=row["total"] or path.stat().st_size,
+                            group_key=row.get("group_key"),
+                            part_index=row.get("part_index"),
+                            part_count=row.get("part_count"))
             await backend.enqueue_upload(job)
             logger.info("requeued job %s (%s)", job.id, job.name)
         else:
             job = UploadJob(id=row["id"], name=row["name"], folder_id=row["folder_id"],
                             total=row["total"], state="error",
-                            error="服务重启，临时文件已清理，请重新上传")
+                            error="服务重启，临时文件已清理，请重新上传",
+                            group_key=row.get("group_key"),
+                            part_index=row.get("part_index"),
+                            part_count=row.get("part_count"))
             backend.jobs.setdefault(job.id, job)
             db.job_save(job)
 
 
+TRAFFIC_TASK: asyncio.Task | None = None
+
+
+async def _traffic_loop() -> None:
+    while True:
+        await asyncio.sleep(15)
+        await asyncio.to_thread(traffic.flush)
+
+
+def _finalize_pending_groups() -> None:
+    """Finish groups whose parts all arrived before the last restart."""
+    for group in db.part_groups_unfinished():
+        try:
+            registered = db.part_group_finalize(group["group_key"])
+        except Exception:
+            logger.exception("could not finalize upload group %s", group["group_key"])
+            continue
+        if registered:
+            db.storage_add(registered["folder_id"], 1, registered["size"])
+            logger.info("finalized upload group %s (%s parts)", group["name"], registered["parts"])
+
+
+async def _refresh_storage() -> None:
+    """Recompute per-folder storage from the backend and cache it in SQLite."""
+    try:
+        folders = await backend.folders()
+    except Exception:
+        logger.exception("storage refresh: could not list folders")
+        return
+    rows: list[tuple[int, int, int]] = []
+    for folder in folders:
+        count = 0
+        size = 0
+        offset = 0
+        for _ in range(10000):
+            try:
+                data = await backend.files(folder["id"], offset=offset, limit=200)
+            except Exception:
+                logger.exception("storage refresh failed for folder %s", folder["id"])
+                break
+            for item in data.get("items", []):
+                count += 1
+                size += int(item.get("size") or 0)
+            offset = int(data.get("next_offset") or 0)
+            if not offset:
+                break
+        rows.append((int(folder["id"]), count, size))
+    db.storage_replace_all(rows)
+    logger.info("storage refreshed: %s folders", len(rows))
+
+
 @app.on_event("startup")
 async def _startup() -> None:
+    global TRAFFIC_TASK
     db.init_db()
     _restore_uploads()
     db.job_prune()
     await backend.start()
     await _restore_jobs()
-    logger.info("seagulldrive started (demo=%s, cache=%s)", config.DEMO_MODE, media_cache.stats())
+    _finalize_pending_groups()
+    TRAFFIC_TASK = asyncio.create_task(_traffic_loop())
+    if config.DEMO_MODE:
+        await _refresh_storage()
+    elif getattr(backend, "state", "") == "ready":
+        asyncio.create_task(_refresh_storage())
+    logger.info("haodrive started (demo=%s, cache=%s)", config.DEMO_MODE, media_cache.stats())
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
+    if TRAFFIC_TASK is not None:
+        TRAFFIC_TASK.cancel()
+        try:
+            await TRAFFIC_TASK
+        except (asyncio.CancelledError, Exception):
+            pass
+    await asyncio.to_thread(traffic.flush)
     client = getattr(backend, "client", None)
     if client is not None:
         try:
@@ -403,6 +486,9 @@ async def upload(request: Request, folder_id: int,
         raise HTTPException(413, "一次最多上传 20 个文件")
     if shutil.disk_usage(config.TMP_DIR).free < 512 * 1024 * 1024:
         raise HTTPException(507, "服务器磁盘空间不足")
+    budget_left = config.TMP_BUDGET_BYTES - parts.tmp_usage() - 64 * 1024 * 1024
+    if budget_left <= 0:
+        raise HTTPException(507, "服务器临时空间不足，请等上一个上传完成")
     jobs: list[dict[str, Any]] = []
     for upload_file in files:
         job_id = uuid.uuid4().hex
@@ -420,17 +506,169 @@ async def upload(request: Request, folder_id: int,
                     total += len(chunk)
                     if total > config.MAX_UPLOAD_BYTES:
                         raise HTTPException(413, f"文件超过 {config.MAX_UPLOAD_BYTES // (1024 ** 3)}GB 上限")
+                    if total > budget_left:
+                        raise HTTPException(413, "超过服务器 2GB 临时空间，请用网页端分片上传")
+                    traffic.add(up=len(chunk))
                     await asyncio.to_thread(handle.write, chunk)
         except BaseException:
             target.unlink(missing_ok=True)
             raise
         finally:
             await upload_file.close()
+        budget_left -= total
         job = UploadJob(id=job_id, name=safe_name, folder_id=folder_id, total=total)
         db.job_save(job)
         await backend.enqueue_upload(job)
         jobs.append({"id": job_id, "name": safe_name, "total": total})
     return {"jobs": jobs}
+
+
+
+# ---- client-side part upload (browser slices the file) ------------------
+
+def _safe_name(raw: Any) -> str:
+    text = os.path.basename(str(raw or "file"))
+    return "".join(ch for ch in text if ch.isprintable() and ch not in "/\\").strip() or "file"
+
+
+@app.get("/api/parts/limits")
+async def part_limits(request: Request) -> dict[str, Any]:
+    guard(request)
+    return {"part_bytes": config.TELEGRAM_PART_BYTES,
+            "tmp_budget": config.TMP_BUDGET_BYTES,
+            "max_bytes": config.MAX_UPLOAD_BYTES,
+            "chunk_size": config.UPLOAD_CHUNK}
+
+
+@app.post("/api/parts")
+async def create_part(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+    guard(request, mutation=True)
+    _purge_uploads()
+    if len(UPLOAD_SESSIONS) >= MAX_UPLOAD_SESSIONS:
+        raise HTTPException(429, "同时进行的上传太多，先完成或取消一些")
+    folder_id = int(payload.get("folder_id") or 0)
+    name = _safe_name(payload.get("name"))
+    size = int(payload.get("size") or 0)
+    part_bytes = int(payload.get("part_bytes") or config.TELEGRAM_PART_BYTES)
+    part_bytes = max(1, min(part_bytes, config.TELEGRAM_PART_BYTES))
+    group_key = str(payload.get("group_key") or "")
+    if not parts.group_key_ok(group_key):
+        raise HTTPException(400, "group_key 不合法")
+    if size < 0:
+        raise HTTPException(400, "size 不合法")
+    if size > config.MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"文件超过 {config.MAX_UPLOAD_BYTES // (1024 ** 3)}GB 上限")
+    expected = parts.part_sizes(size, part_bytes)
+    part_count = int(payload.get("part_count") or len(expected))
+    part_index = int(payload.get("part_index") or 0)
+    if part_count != len(expected):
+        raise HTTPException(409, "分片数量和文件大小对不上")
+    if not 0 <= part_index < part_count:
+        raise HTTPException(400, "part_index 越界")
+    part_size = expected[part_index]
+    mime, kind = parts.mime_kind(name)
+
+    group = db.part_group_get(group_key)
+    if group:
+        if (group["folder_id"] != folder_id or group["name"] != name
+                or group["size"] != size or group["part_bytes"] != part_bytes
+                or group["part_count"] != part_count):
+            raise HTTPException(409, "上传分组参数不一致")
+    else:
+        group = db.part_group_create(group_key, folder_id, name, size, part_bytes,
+                                     part_count, mime, kind, expected)
+        logger.info("part group created: %s (%s parts, %s bytes)", name, part_count, size)
+
+    row = next((p for p in db.part_group_parts(group_key)
+                if p["part_index"] == part_index), None)
+    if row and row["state"] == "done" and row["message_id"]:
+        return {"state": "done", "part_index": part_index, "part_count": part_count,
+                "message_id": row["message_id"], "size": part_size,
+                "offset": part_size}
+
+    for uid, session in UPLOAD_SESSIONS.items():
+        if session.get("group_key") == group_key and session.get("part_index") == part_index:
+            return {"id": uid, "offset": session["received"], "size": part_size,
+                    "chunk_size": config.UPLOAD_CHUNK, "state": "uploading",
+                    "part_index": part_index, "part_count": part_count}
+
+    stale = db.part_group_upload_session(group_key, part_index)
+    if stale:
+        db.upload_delete(stale["id"])
+    in_flight = db.job_find_part(group_key, part_index)
+    if in_flight:
+        raise HTTPException(409, "这一片正在发往 Telegram，等它完成")
+
+    used = parts.tmp_usage()
+    if used + part_size > config.TMP_BUDGET_BYTES:
+        raise HTTPException(507, "服务器临时空间不足（2GB 上限），等上一片发完再试")
+    free = shutil.disk_usage(config.TMP_DIR).free
+    if free < 512 * 1024 * 1024 or free < part_size * 1.1:
+        raise HTTPException(507, "服务器磁盘空间不足")
+
+    uid = uuid.uuid4().hex
+    path = config.TMP_DIR / uid
+    path.touch()
+    os.chmod(path, 0o600)
+    session = {"folder_id": folder_id, "name": name, "size": part_size,
+               "path": path, "received": 0, "created": time.time(),
+               "group_key": group_key, "part_index": part_index,
+               "part_count": part_count}
+    UPLOAD_SESSIONS[uid] = session
+    UPLOAD_LOCKS[uid] = asyncio.Lock()
+    db.upload_save(uid, folder_id, name, part_size, 0, int(session["created"]),
+                   group_key, part_index)
+    db.part_group_set_state(group_key, part_index, "uploading")
+    return {"id": uid, "offset": 0, "size": part_size, "chunk_size": config.UPLOAD_CHUNK,
+            "state": "uploading", "part_index": part_index, "part_count": part_count}
+
+
+@app.delete("/api/parts/{group_key}")
+async def cancel_part_group(request: Request, group_key: str) -> dict[str, Any]:
+    guard(request, mutation=True)
+    group = db.part_group_get(group_key)
+    if not group:
+        return {"ok": True}
+    for uid, session in list(UPLOAD_SESSIONS.items()):
+        if session.get("group_key") != group_key:
+            continue
+        UPLOAD_SESSIONS.pop(uid, None)
+        UPLOAD_LOCKS.pop(uid, None)
+        try:
+            session["path"].unlink()
+        except OSError:
+            pass
+        db.upload_delete(uid)
+    sent = [int(p["message_id"]) for p in db.part_group_parts(group_key)
+            if p["state"] == "done" and p["message_id"]]
+    try:
+        await backend.delete_messages_only(group["folder_id"], sent)
+    except Exception:
+        logger.exception("could not delete cancelled part messages")
+    db.part_group_delete(group_key)
+    db.upload_delete_group(group_key)
+    return {"ok": True}
+
+
+@app.get("/api/parts/{group_key}")
+async def part_group_status(request: Request, group_key: str) -> dict[str, Any]:
+    guard(request)
+    group = db.part_group_get(group_key)
+    if not group:
+        raise HTTPException(404, "上传分组不存在")
+    sessions = {s.get("part_index"): uid for uid, s in UPLOAD_SESSIONS.items()
+                if s.get("group_key") == group_key}
+    out: list[dict[str, Any]] = []
+    for row in db.part_group_parts(group_key):
+        item: dict[str, Any] = {"index": row["part_index"], "size": row["part_size"],
+                                "state": row["state"], "message_id": row["message_id"]}
+        uid = sessions.get(row["part_index"])
+        if uid:
+            item.update({"upload_id": uid, "offset": UPLOAD_SESSIONS[uid]["received"]})
+        out.append(item)
+    return {"group_key": group_key, "name": group["name"], "size": group["size"],
+            "part_bytes": group["part_bytes"], "part_count": group["part_count"],
+            "parts": out}
 
 
 # ---- resumable (chunked) upload -----------------------------------------
@@ -444,8 +682,12 @@ def _purge_uploads() -> None:
             except OSError:
                 pass
             db.upload_delete(uid)
+            session_part = session
             UPLOAD_SESSIONS.pop(uid, None)
             UPLOAD_LOCKS.pop(uid, None)
+            if session_part.get("group_key") is not None and session_part.get("part_index") is not None:
+                db.part_group_set_state(session_part["group_key"],
+                                        session_part["part_index"], "pending")
 
 
 @app.post("/api/uploads")
@@ -462,6 +704,10 @@ async def create_upload(request: Request, payload: dict[str, Any]) -> dict[str, 
         raise HTTPException(400, "size 不合法")
     if size > config.MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"文件超过 {config.MAX_UPLOAD_BYTES // (1024 ** 3)}GB 上限")
+    if size > config.TMP_BUDGET_BYTES:
+        raise HTTPException(413, "超过 2GB 临时空间上限，请使用网页端分片上传")
+    if parts.tmp_usage() + size > config.TMP_BUDGET_BYTES:
+        raise HTTPException(507, "服务器临时空间不足，请等上一个上传完成")
     free = shutil.disk_usage(config.TMP_DIR).free
     if free < 512 * 1024 * 1024 or free < size * 1.1:
         raise HTTPException(507, "服务器磁盘空间不足")
@@ -508,8 +754,10 @@ async def upload_chunk(request: Request, upload_id: str, offset: int = 0) -> dic
                 written += len(chunk)
                 await asyncio.to_thread(handle.write, chunk)
         session["received"] += written
+        traffic.add(up=written)
         db.upload_save(upload_id, session["folder_id"], session["name"],
-                       session["size"], session["received"], int(session["created"]))
+                       session["size"], session["received"], int(session["created"]),
+                       session.get("group_key"), session.get("part_index"))
     return {"offset": session["received"], "size": session["size"]}
 
 
@@ -528,7 +776,9 @@ async def complete_upload(request: Request, upload_id: str) -> dict[str, Any]:
         if session["received"] != session["size"] or actual != session["size"]:
             raise HTTPException(409, f"还差 {session['size'] - session['received']} 字节")
         job = UploadJob(id=upload_id, name=session["name"], folder_id=session["folder_id"],
-                        total=session["size"])
+                        total=session["size"], group_key=session.get("group_key"),
+                        part_index=session.get("part_index"),
+                        part_count=session.get("part_count"))
         db.job_save(job)
         await backend.enqueue_upload(job)
         UPLOAD_SESSIONS.pop(upload_id, None)
@@ -548,6 +798,8 @@ async def abort_upload(request: Request, upload_id: str) -> dict[str, Any]:
                 session["path"].unlink()
             except OSError:
                 pass
+            if session.get("group_key") is not None and session.get("part_index") is not None:
+                db.part_group_set_state(session["group_key"], session["part_index"], "pending")
     return {"ok": True}
 
 
@@ -555,7 +807,9 @@ async def abort_upload(request: Request, upload_id: str) -> dict[str, Any]:
 
 def _job_dict(job) -> dict[str, Any]:
     return {"id": job.id, "name": job.name, "state": job.state, "sent": job.sent,
-            "total": job.total, "message_id": job.message_id, "error": job.error}
+            "total": job.total, "message_id": job.message_id, "error": job.error,
+            "part_index": getattr(job, "part_index", None),
+            "part_count": getattr(job, "part_count", None)}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -568,7 +822,8 @@ async def job_status(request: Request, job_id: str) -> dict[str, Any]:
     if not row:
         raise HTTPException(404, "任务不存在")
     return {"id": row["id"], "name": row["name"], "state": row["state"], "sent": row["sent"],
-            "total": row["total"], "message_id": row["message_id"], "error": row["error"]}
+            "total": row["total"], "message_id": row["message_id"], "error": row["error"],
+            "part_index": row.get("part_index"), "part_count": row.get("part_count")}
 
 
 @app.post("/api/jobs/{job_id}/retry")
@@ -582,7 +837,9 @@ async def retry_job(request: Request, job_id: str) -> dict[str, Any]:
         raise HTTPException(410, "临时文件已删除，请重新上传")
     if not db.job_claim_retry(job_id):
         raise HTTPException(409, "任务状态已变化")
-    job = UploadJob(id=job_id, name=row["name"], folder_id=row["folder_id"], total=row["total"])
+    job = UploadJob(id=job_id, name=row["name"], folder_id=row["folder_id"], total=row["total"],
+                    group_key=row.get("group_key"), part_index=row.get("part_index"),
+                    part_count=row.get("part_count"))
     db.job_save(job)
     await backend.enqueue_upload(job)
     return {"id": job.id, "state": "queued"}
@@ -597,8 +854,83 @@ async def job_list(request: Request) -> dict[str, Any]:
         if row["id"] not in known:
             jobs.append({"id": row["id"], "name": row["name"], "state": row["state"],
                          "sent": row["sent"], "total": row["total"],
-                         "message_id": row["message_id"], "error": row["error"]})
+                         "message_id": row["message_id"], "error": row["error"],
+                         "part_index": row.get("part_index"),
+                         "part_count": row.get("part_count")})
     return {"jobs": jobs}
+
+
+
+# ---- dashboard stats -----------------------------------------------------
+
+def _traffic_series(days: int) -> list[dict[str, Any]]:
+    rows = {row["day"]: row for row in db.traffic_days(days)}
+    today = datetime.date.today()
+    out: list[dict[str, Any]] = []
+    for offset in range(days - 1, -1, -1):
+        day = (today - datetime.timedelta(days=offset)).isoformat()
+        row = rows.get(day)
+        out.append({"day": day,
+                    "up": int(row["up_bytes"]) if row else 0,
+                    "down": int(row["down_bytes"]) if row else 0,
+                    "up_files": int(row["up_files"]) if row else 0,
+                    "down_files": int(row["down_files"]) if row else 0})
+    pending = traffic.snapshot()
+    if out:
+        out[-1]["up"] += pending["up"]
+        out[-1]["down"] += pending["down"]
+        out[-1]["up_files"] += pending["up_files"]
+        out[-1]["down_files"] += pending["down_files"]
+    return out
+
+
+async def _stats_payload(days: int) -> dict[str, Any]:
+    folders = await backend.folders()
+    stored = db.storage_rows()
+    by_folder: list[dict[str, Any]] = []
+    total_bytes = 0
+    total_files = 0
+    for folder in folders:
+        row = stored.get(int(folder["id"]), {})
+        size = int(row.get("bytes", 0))
+        count = int(row.get("files", 0))
+        total_bytes += size
+        total_files += count
+        by_folder.append({"id": folder["id"], "name": folder["name"],
+                          "bytes": size, "files": count})
+    by_folder.sort(key=lambda item: item["bytes"], reverse=True)
+    totals = db.traffic_totals()
+    pending = traffic.snapshot()
+    totals["up"] += pending["up"]
+    totals["down"] += pending["down"]
+    totals["up_files"] += pending["up_files"]
+    totals["down_files"] += pending["down_files"]
+    disk = shutil.disk_usage(config.DATA_DIR)
+    return {
+        "storage": {"used_bytes": total_bytes, "files": total_files,
+                    "folders": len(folders), "quota_bytes": config.STORAGE_QUOTA_BYTES,
+                    "by_folder": by_folder,
+                    "updated": max((int(r.get("updated", 0)) for r in stored.values()), default=0)},
+        "traffic": {"days": _traffic_series(days), "totals": totals,
+                    "today": _traffic_series(1)[-1]},
+        "vps_disk": {"total": disk.total, "used": disk.used, "free": disk.free},
+        "cache": media_cache.stats(),
+        "jobs": len(backend.jobs),
+        "uploads": len(UPLOAD_SESSIONS),
+    }
+
+
+@app.get("/api/stats")
+async def stats(request: Request, days: int = 30) -> dict[str, Any]:
+    guard(request)
+    return await _stats_payload(max(1, min(int(days), 365)))
+
+
+@app.post("/api/stats/refresh")
+async def stats_refresh(request: Request) -> dict[str, Any]:
+    guard(request, mutation=True)
+    await _refresh_storage()
+    return {"ok": True}
 
 
 # ---- status --------------------------------------------------------------
@@ -626,6 +958,23 @@ def content_disposition(name: str, inline: bool = False) -> str:
 
 def _416(size: int) -> Response:
     return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+
+
+def counting_stream(stream):
+    """Wrap a download iterator so every byte we actually send is accounted."""
+    async def generator():
+        sent = 0
+        try:
+            async for chunk in stream:
+                if not chunk:
+                    continue
+                sent += len(chunk)
+                traffic.add(down=len(chunk))
+                yield chunk
+        finally:
+            if sent:
+                traffic.add(down_files=1)
+    return generator()
 
 
 async def media_response(folder_id: int, message_id: int, request: Request,
@@ -688,7 +1037,36 @@ async def media_response(folder_id: int, message_id: int, request: Request,
             )
     else:
         stream = backend.download_iter(folder_id, message_id, start, length)
-    return StreamingResponse(stream, status_code=status, headers=headers, media_type=media_type)
+    return StreamingResponse(counting_stream(stream), status_code=status,
+                             headers=headers, media_type=media_type)
+
+
+
+@app.get("/api/folders/{folder_id}/files/{message_id}/manifest")
+async def file_manifest(request: Request, folder_id: int, message_id: int) -> dict[str, Any]:
+    """Part list for browser-side download/merge.
+
+    Offsets and sizes are logical-file coordinates; the client asks the normal
+    Range endpoint for each slice and writes them to disk in order.
+    """
+    guard(request)
+    info = await backend.file_info(folder_id, message_id)
+    size = int(info["size"])
+    group = db.group_by_message(folder_id, message_id)
+    out: list[dict[str, Any]] = []
+    if group and int(group["parts_count"]) > 1:
+        position = 0
+        for index, part in enumerate(db.group_parts(folder_id, group["first_message_id"])):
+            part_size = int(part["part_size"])
+            out.append({"index": index, "message_id": int(part["message_id"]),
+                        "offset": position, "size": part_size})
+            position += part_size
+    else:
+        out.append({"index": 0, "message_id": int(info.get("id", message_id)),
+                    "offset": 0, "size": size})
+    return {"name": info["name"], "size": size, "mime": info.get("mime", ""),
+            "kind": info.get("kind", "file"), "parts": out,
+            "part_bytes": config.TELEGRAM_PART_BYTES}
 
 
 @app.get("/api/folders/{folder_id}/files/{message_id}/stream")
@@ -780,14 +1158,14 @@ def _esc(value: str) -> str:
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
-def _unlock_form(token: str) -> str:
-    return f"""<!doctype html><meta charset="utf-8"><title>需要密码</title>
+def _unlock_form(token: str, lang: str) -> str:
+    return f"""<!doctype html><html lang="{lang}"><meta charset="utf-8"><title>{i18n.t(lang, "need_password")}</title>
 <style>body{{font-family:system-ui;background:#0f1115;color:#e6e6e6;display:grid;place-items:center;height:100vh;margin:0}}
 form{{background:#171a21;padding:28px;border-radius:14px;width:280px}}
 input{{width:100%;padding:10px;margin:12px 0;border-radius:8px;border:1px solid #2c3140;background:#0f1115;color:#fff;box-sizing:border-box}}
 button{{width:100%;padding:10px;border:0;border-radius:8px;background:#4f8cff;color:#fff;font-size:15px}}</style>
-<form method="post" action="/s/{token}/unlock"><h3>此链接受密码保护</h3>
-<input type="password" name="password" placeholder="访问密码" autofocus><button>解锁</button></form>"""
+<form method="post" action="/s/{token}/unlock?lang={lang}"><h3>{i18n.t(lang, "password_protected")}</h3>
+<input type="password" name="password" placeholder="{i18n.t(lang, "access_password")}" autofocus><button>{i18n.t(lang, "unlock")}</button></form>"""
 
 
 def _size_text(size: int) -> str:
@@ -796,7 +1174,7 @@ def _size_text(size: int) -> str:
     return f"{size / 1024:.1f} KB"
 
 
-def _file_page(token: str, info: dict[str, Any], base: str | None = None) -> str:
+def _file_page(token: str, info: dict[str, Any], lang: str, base: str | None = None) -> str:
     name = _esc(info["name"])
     raw = base or f"/s/{token}/raw"
     preview = ""
@@ -806,47 +1184,55 @@ def _file_page(token: str, info: dict[str, Any], base: str | None = None) -> str
         tag = "video" if info["kind"] == "video" else "audio"
         preview = (f'<{tag} controls src="{raw}?inline=1" '
                    f'style="max-width:100%;width:640px;border-radius:12px;margin-bottom:18px"></{tag}>')
-    return f"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    return f"""<!doctype html><html lang="{lang}"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{name}</title>
 <style>body{{font-family:system-ui;background:#0f1115;color:#e6e6e6;display:grid;place-items:center;min-height:100vh;margin:0}}
 .card{{background:#171a21;padding:28px;border-radius:16px;max-width:720px;width:90%;text-align:center}}
 a.btn{{display:inline-block;margin-top:14px;padding:10px 18px;border-radius:9px;background:#4f8cff;color:#fff;text-decoration:none}}
 .muted{{color:#8b93a7;font-size:13px}}</style>
 <div class="card">{preview}<h3>{name}</h3><div class="muted">{_size_text(info["size"])}</div>
-<a class="btn" href="{raw}">下载</a></div>"""
+<a class="btn" href="{raw}">{i18n.t(lang, "download")}</a></div>"""
 
 
-def _folder_page(token: str, items: list[dict[str, Any]]) -> str:
+def _folder_page(token: str, items: list[dict[str, Any]], lang: str) -> str:
     rows = "".join(
-        f'<li><a href="/s/{token}/{item["id"]}">{_esc(item["name"])}</a>'
+        f'<li><a href="/s/{token}/{item["id"]}?lang={lang}">{_esc(item["name"])}</a>'
         f'<span class="muted"> {_size_text(item["size"])}</span></li>'
         for item in items
     )
-    return f"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>共享文件夹</title>
+    return f"""<!doctype html><html lang="{lang}"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{i18n.t(lang, "shared_folder")}</title>
 <style>body{{font-family:system-ui;background:#0f1115;color:#e6e6e6;margin:0;padding:32px}}
 .card{{background:#171a21;padding:24px;border-radius:16px;max-width:760px;margin:0 auto}}
 li{{margin:10px 0}} a{{color:#4f8cff;text-decoration:none}} .muted{{color:#8b93a7;font-size:13px}}</style>
-<div class="card"><h3>共享文件夹</h3><ul>{rows or '<li class="muted">空文件夹</li>'}</ul></div>"""
+<div class="card"><h3>{i18n.t(lang, "shared_folder")}</h3><ul>{rows or f'<li class="muted">{i18n.t(lang, "empty_folder")}</li>'}</ul></div>"""
+
+
+def _share_error(lang: str, key: str, status: int) -> HTMLResponse:
+    return HTMLResponse(
+        f'<!doctype html><html lang="{lang}"><meta charset="utf-8">'
+        f'<body style="font-family:system-ui;background:#0f1115;color:#e6e6e6">'
+        f'<h1>{i18n.t(lang, key)}</h1></body>', status_code=status)
 
 
 @app.get("/s/{token}", response_class=HTMLResponse)
 async def share_page(request: Request, token: str) -> HTMLResponse:
+    lang = i18n.detect(request)
     share = db.get_share(token)
     if not share:
-        return HTMLResponse("<h1>链接不存在</h1>", status_code=404)
+        return _share_error(lang, "link_missing", 404)
     if _share_expired(share):
-        return HTMLResponse("<h1>链接已过期</h1>", status_code=410)
+        return _share_error(lang, "link_expired", 410)
     if not _share_ok(request, share):
-        return HTMLResponse(_unlock_form(token))
+        return HTMLResponse(_unlock_form(token, lang))
     try:
         if share["message_id"]:
             info = await backend.file_info(share["folder_id"], share["message_id"])
-            return HTMLResponse(_file_page(token, info))
+            return HTMLResponse(_file_page(token, info, lang))
         files = await backend.files(share["folder_id"], offset=0, limit=200)
-        return HTMLResponse(_folder_page(token, files["items"]))
+        return HTMLResponse(_folder_page(token, files["items"], lang))
     except BackendError:
-        return HTMLResponse("<h1>文件已删除</h1>", status_code=404)
+        return _share_error(lang, "file_deleted", 404)
 
 
 @app.post("/s/{token}/unlock")
@@ -865,7 +1251,10 @@ async def share_unlock(request: Request, token: str) -> Response:
     if not share.get("password_hash") or not security._check_hash(password, share["password_hash"]):
         security.share_limiter.record(limit_key)
         return RedirectResponse(f"/s/{token}", status_code=303)
-    response = RedirectResponse(f"/s/{token}", status_code=303)
+    lang = i18n.detect(request)
+    response = RedirectResponse(f"/s/{token}?lang={lang}", status_code=303)
+    response.set_cookie("hd_lang", lang, max_age=86400 * 365, httponly=False,
+                        samesite="lax", path="/")
     response.set_cookie(
         f"{SHARE_COOKIE}_{token}", security.issue_share(token),
         max_age=3600, httponly=True, samesite="lax",
@@ -892,15 +1281,16 @@ async def share_raw(request: Request, token: str, inline: int = 0) -> Response:
 
 @app.get("/s/{token}/{message_id}", response_class=HTMLResponse)
 async def share_item_page(request: Request, token: str, message_id: int) -> HTMLResponse:
+    lang = i18n.detect(request)
     share = db.get_share(token)
     if not share or share["message_id"]:
         raise HTTPException(404, "链接不存在")
     if _share_expired(share):
-        return HTMLResponse("<h1>链接已过期</h1>", status_code=410)
+        return _share_error(lang, "link_expired", 410)
     if not _share_ok(request, share):
-        return HTMLResponse(_unlock_form(token))
+        return HTMLResponse(_unlock_form(token, lang))
     info = await backend.file_info(share["folder_id"], message_id)
-    return HTMLResponse(_file_page(token, info, base=f"/s/{token}/{message_id}/raw"))
+    return HTMLResponse(_file_page(token, info, lang, base=f"/s/{token}/{message_id}/raw"))
 
 
 @app.get("/s/{token}/{message_id}/raw")

@@ -9,7 +9,7 @@ from fastapi import HTTPException, Request
 
 from . import config
 
-COOKIE_NAME = "sd_session"
+COOKIE_NAME = "hd_session"
 _SCRYPT_N = 2**15
 _SCRYPT_R = 8
 _SCRYPT_P = 1
@@ -194,7 +194,7 @@ def require_admin(request: Request) -> None:
 
 def require_mutation(request: Request) -> None:
     """Custom-header check: browsers cannot send it cross-site without a preflight."""
-    if request.headers.get("x-requested-with") != "seagulldrive":
+    if request.headers.get("x-requested-with") not in ("haodrive", "seagulldrive"):
         raise HTTPException(status_code=403, detail="missing mutation header")
 
 

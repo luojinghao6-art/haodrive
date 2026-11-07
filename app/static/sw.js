@@ -1,5 +1,5 @@
-const CACHE = 'seagulldrive-v9';
-const SHELL = ['./', 'static/style.css?v=9', 'static/app.js?v=9', 'static/icon.svg', 'static/manifest.webmanifest'];
+const CACHE = 'haodrive-v13';
+const SHELL = ['./', 'static/style.css?v=13', 'static/i18n.js?v=13', 'static/app.js?v=13', 'static/icon.svg', 'static/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));

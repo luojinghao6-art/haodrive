@@ -1,7 +1,7 @@
 import os
 import tempfile
 
-DATA_DIR = tempfile.mkdtemp(prefix="seagulldrive-test-")
+DATA_DIR = tempfile.mkdtemp(prefix="haodrive-test-")
 os.environ["DEMO_MODE"] = "1"
 os.environ["ADMIN_PASSWORD"] = "test-password-123"
 os.environ["DATA_DIR"] = DATA_DIR
@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
-HEADERS = {"X-Requested-With": "seagulldrive"}
+HEADERS = {"X-Requested-With": "haodrive"}
 
 
 @pytest.fixture(scope="session")
