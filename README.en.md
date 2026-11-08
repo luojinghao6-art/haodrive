@@ -39,6 +39,27 @@ See [docs/RISK.md](docs/RISK.md).
 - **Overview dashboard**: storage used, optional quota meter, lifetime upload/download, 30-day traffic chart, per-folder usage
 - Responsive UI that works on phones
 
+## Android app (native)
+
+`android/` is a native Android client written in **Kotlin + Jetpack Compose** that talks to the same HTTP API.
+
+![Android dashboard](docs/screenshots/android-dashboard.png)
+
+- Bottom navigation with three boxes: **Files / Overview / Settings** (overview is a bottom tab with two-column metric cards, not a left rail)
+- Folder switching, search, upload through the same browser-style part API (with part progress)
+- Image thumbnails; video/audio via Media3 with HTTP Range, parts stitched by the server
+- Download to any folder, rename, delete
+- Overview: used space, file count, lifetime upload/download, server disk, 7/30/90-day traffic chart, per-folder usage
+
+Build (JDK 17 + Android SDK):
+
+```bash
+cd android
+./gradlew assembleRelease
+```
+
+See [android/README.md](android/README.md).
+
 ## Architecture
 
 ```

@@ -39,6 +39,27 @@
 - **概览仪表盘**：已用空间、配额进度、累计上传/下载、30 天流量图、按文件夹占用
 - 响应式 UI，手机能用
 
+## 安卓客户端（原生）
+
+`android/` 是用 **Kotlin + Jetpack Compose** 写的原生安卓客户端，直接调用同一套 HTTP API。
+
+![安卓概览](docs/screenshots/android-dashboard.png)
+
+- 底部导航三个方框：**文件 / 概览 / 设置**（概览不是左侧导航栏，指标以两列卡片展示）
+- 文件夹切换、搜索、上传（走浏览器同款分片接口，带片数进度）
+- 图片缩略图、视频/音频 Media3 播放（HTTP Range，跨分片由服务端拼接）
+- 下载到任意目录、重命名、删除
+- 概览：已用空间、文件数、累计上传/下载、服务器磁盘、7/30/90 天流量图、文件夹占用
+
+构建（需要 JDK 17 + Android SDK）：
+
+```bash
+cd android
+./gradlew assembleRelease
+```
+
+详见 [android/README.md](android/README.md)。
+
 ## 架构
 
 ```

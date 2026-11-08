@@ -1,5 +1,5 @@
-data/
-data-*/
+/data/
+/data-*/
 .env
 cookies*.txt
 __pycache__/
@@ -18,3 +18,15 @@ tools/shot-live*.mjs
 tools/list_dialogs.py
 tools/*.service
 .pytest_cache/
+
+# Android client
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+android/app/release/
+*.apk
+*.aab
+android/keystore.properties
+android/*.jks
