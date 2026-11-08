@@ -36,7 +36,7 @@ See [docs/RISK.md](docs/RISK.md).
 - Delete, move to another folder (forward + delete the original)
 - Share links with optional expiry and optional password on a standalone public page
 - **Chinese and English UI**, one click to switch; share pages follow the browser language
-- **Overview dashboard**: storage used, optional quota meter, lifetime upload/download, 30-day traffic chart, per-folder usage
+- **Overview dashboard**: storage used, optional quota meter, lifetime upload/download, 30-day traffic chart, per-folder usage; it lives in the bottom navigation boxes (Files / Overview / Shares / WebDAV), not in the left sidebar
 - Responsive UI that works on phones
 
 ## Android app (native)

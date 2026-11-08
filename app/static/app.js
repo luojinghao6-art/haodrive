@@ -296,8 +296,15 @@ function renderFolders() {
   }
 }
 
+function setActiveNav(page) {
+  for (const box of document.querySelectorAll('#bottom-nav .nav-box')) {
+    box.classList.toggle('active', box.dataset.nav === page);
+  }
+}
+
 function openFilesPage() {
   state.page = 'files';
+  setActiveNav('files');
   $('files-page').classList.remove('hidden');
   $('stats-page').classList.add('hidden');
   $('topbar-files').classList.remove('hidden');
@@ -1350,6 +1357,7 @@ async function loadStats() {
 
 async function openStats() {
   state.page = 'stats';
+  setActiveNav('stats');
   state.selecting = false;
   state.selection.clear();
   updateBatchBar();
@@ -1363,6 +1371,10 @@ async function openStats() {
   state.statsTimer = setInterval(() => { if (state.page === 'stats') loadStats(); }, 10000);
 }
 
+$('btn-nav-files').addEventListener('click', () => {
+  closeSidebar();
+  openFilesPage();
+});
 $('btn-stats').addEventListener('click', () => { openStats(); });
 $('stats-days').addEventListener('change', (event) => {
   state.statsDays = Number(event.target.value) || 30;
