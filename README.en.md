@@ -8,6 +8,21 @@ The idea is the same as [Telegram-Drive](https://github.com/caamer20/Telegram-Dr
 
 ---
 
+---
+
+## ⚠️ Risk & Disclaimer
+
+**This project is a personal hobby/research experiment** that explores using a private Telegram channel as a storage backend, plus browser-side multipart upload and cross-part playback. It is not a product and comes with no service guarantees.
+
+- Using a third-party messaging API as a cloud drive **may violate Telegram's Terms of Service**. Bulk uploads, long-term storage of large files, and automated high-frequency calls can all be treated as abuse.
+- Consequences include but are not limited to: **rate limits, feature restrictions, temporary freezes, or a permanent account ban**. Channels and files can disappear with the account.
+- Laws on data storage, cross-border transfer and copyrighted content differ by jurisdiction. **Check your local law before using this.** Do not use it to store or distribute illegal or infringing content.
+- This project is not affiliated with Telegram. The author is not responsible for account bans, data loss, service interruptions or any legal consequences.
+- Suggestions: start with a test account, store only your own files, keep upload rates modest, and back up anything important elsewhere.
+
+See [docs/RISK.md](docs/RISK.md).
+
+
 ## Features
 
 - Web login with a single admin password and signed session cookies
