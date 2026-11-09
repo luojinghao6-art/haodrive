@@ -60,6 +60,12 @@ class MediaCache:
             except OSError:
                 pass
 
+    def set_capacity(self, capacity_bytes: int) -> None:
+        """Change the ceiling without dropping cached blocks."""
+        with self._mutex:
+            self.capacity = max(capacity_bytes, BLOCK * 2)
+            self._evict_locked()
+
     # ---- paths -----------------------------------------------------------
 
     def _entry(self, key: str, size: int) -> Entry:

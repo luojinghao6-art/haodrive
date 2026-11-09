@@ -54,6 +54,15 @@ _PASSWORD_HASH = (
 
 
 def check_password(candidate: str) -> bool:
+    # A password rotated from the Settings page lives in SQLite and wins over
+    # the environment value; the env password is only the bootstrap credential.
+    try:
+        from . import db
+        stored = db.kv_get("admin_password_hash", secret=True)
+    except Exception:
+        stored = None
+    if stored:
+        return _check_hash(candidate, stored)
     if not _PASSWORD_HASH:
         return False
     if config.ADMIN_PASSWORD and hmac.compare_digest(candidate, config.ADMIN_PASSWORD):

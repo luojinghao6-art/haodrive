@@ -13,6 +13,8 @@ CACHE_DIR = DATA_DIR / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 DOMAIN = os.getenv("DOMAIN", "").strip()
+# Shown in the browser title and on the login card; editable in Settings.
+SITE_NAME = os.getenv("SITE_NAME", "HaoDrive").strip() or "HaoDrive"
 APP_SECRET = os.getenv("APP_SECRET", "").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "").strip()

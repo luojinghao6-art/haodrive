@@ -31,6 +31,35 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+const ICON_NAMES = { image: 'i-image', video: 'i-video', audio: 'i-audio', pdf: 'i-pdf', text: 'i-text' };
+function icon(name, cls = 'ic') {
+  return `<svg class="${cls}"><use href="#${name}"/></svg>`;
+}
+
+const THEME_KEY = 'haodrive_theme';
+const THEMES = ['system', 'light', 'dark'];
+function currentTheme() {
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (THEMES.includes(saved)) return saved;
+  } catch (_) { /* private mode */ }
+  return 'system';
+}
+function applyTheme(mode) {
+  const root = document.documentElement;
+  if (mode === 'system') root.removeAttribute('data-theme');
+  else root.dataset.theme = mode;
+  try { localStorage.setItem(THEME_KEY, mode); } catch (_) { /* ignore */ }
+  const dark = mode === 'dark'
+    || (mode === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = dark ? '#0b0d12' : '#f5f6fa';
+  for (const button of document.querySelectorAll('.theme-toggle')) {
+    button.innerHTML = icon(dark ? 'i-sun' : 'i-moon');
+    button.title = T(mode === 'system' ? '跟随系统' : (mode === 'light' ? '浅色' : '深色'));
+  }
+}
+
 /* ---------- helpers ---------- */
 
 function escapeHtml(value) {
@@ -139,6 +168,14 @@ function initChrome() {
     button.textContent = LANG === 'zh' ? 'EN' : '中文';
     button.addEventListener('click', toggleLang);
   }
+  applyTheme(currentTheme());
+  for (const button of document.querySelectorAll('.theme-toggle')) {
+    button.addEventListener('click', () => {
+      const dark = currentTheme() === 'dark'
+        || (currentTheme() === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+      applyTheme(dark ? 'light' : 'dark');
+    });
+  }
   try {
     const legacyFolder = localStorage.getItem('sd_folder');
     if (legacyFolder && !localStorage.getItem('hd_folder')) {
@@ -147,10 +184,20 @@ function initChrome() {
   } catch (_) { /* private mode */ }
 }
 
+function applySiteName(name) {
+  if (!name) return;
+  document.title = name;
+  const brand = $('brand-name');
+  if (brand) brand.textContent = name;
+  const login = $('login-title');
+  if (login) login.textContent = name;
+}
+
 async function boot() {
   initChrome();
   try {
     const session = await api('/api/session');
+    applySiteName(session.site_name);
     if (!session.authenticated) { showLogin(); return; }
     if (session.demo) { await enterApp(); return; }
     const tg = session.telegram || {};
@@ -282,7 +329,7 @@ function renderFolders() {
   for (const folder of state.folders) {
     const button = document.createElement('button');
     button.className = 'folder' + (folder.id === state.folderId ? ' active' : '');
-    button.innerHTML = `<span class="icon">📁</span><span class="name">${escapeHtml(folder.name)}</span>`;
+    button.innerHTML = `<span class="icon">${icon('i-folder')}</span><span class="name">${escapeHtml(folder.name)}</span>`;
     button.addEventListener('click', () => { closeSidebar(); selectFolder(folder.id); });
     button.addEventListener('contextmenu', (event) => {
       event.preventDefault();
@@ -307,6 +354,7 @@ function openFilesPage() {
   setActiveNav('files');
   $('files-page').classList.remove('hidden');
   $('stats-page').classList.add('hidden');
+  $('settings-page').classList.add('hidden');
   $('topbar-files').classList.remove('hidden');
   $('folder-title').textContent =
     (state.folders.find((f) => f.id === state.folderId) || {}).name || T('文件');
@@ -382,7 +430,7 @@ async function loadFiles(reset) {
 }
 
 function fileIcon(kind) {
-  return ({ image: '🖼️', video: '🎬', audio: '🎵', pdf: '📕', text: '📄' })[kind] || '📦';
+  return icon(ICON_NAMES[kind] || 'i-file');
 }
 
 function renderFiles() {
@@ -422,7 +470,7 @@ function renderFiles() {
     if (img) img.addEventListener('error', () => {
       const fallback = document.createElement('div');
       fallback.className = 'file-icon';
-      fallback.textContent = fileIcon(file.kind);
+      fallback.innerHTML = fileIcon(file.kind);
       img.replaceWith(fallback);
     });
     card.addEventListener('click', (event) => {
@@ -1363,6 +1411,7 @@ async function openStats() {
   updateBatchBar();
   $('files-page').classList.add('hidden');
   $('stats-page').classList.remove('hidden');
+  $('settings-page').classList.add('hidden');
   $('topbar-files').classList.add('hidden');
   $('folder-title').textContent = T('概览');
   closeSidebar();
@@ -1392,6 +1441,267 @@ $('stats-refresh').addEventListener('click', async () => {
     button.disabled = false;
   }
 });
+
+
+/* ---------- settings page ---------- */
+
+const GROUP_META = {
+  general: { icon: 'i-settings', zh: '通用', en: 'General' },
+  storage: { icon: 'i-database', zh: '存储', en: 'Storage' },
+  transfer: { icon: 'i-upload', zh: '传输', en: 'Transfer' },
+  media: { icon: 'i-video', zh: '媒体', en: 'Media' },
+  security: { icon: 'i-lock', zh: '安全', en: 'Security' },
+};
+const BYTE_UNITS = { MB: 1024 ** 2, GB: 1024 ** 3 };
+
+function unitValue(value) {
+  const gb = 1024 ** 3;
+  if (value >= gb) return [Math.round((value / gb) * 100) / 100, 'GB'];
+  return [Math.round((value / 1024 ** 2) * 100) / 100, 'MB'];
+}
+
+function settingRow(item) {
+  const label = LANG === 'en' ? item.label_en : item.label;
+  const hint = LANG === 'en' ? item.hint_en : item.hint;
+  let control;
+  if (item.kind === 'bytes') {
+    const [number, unit] = unitValue(Number(item.value));
+    control = `<input type="number" min="0" step="0.01" value="${number}">
+      <select class="unit-select"><option ${unit === 'MB' ? 'selected' : ''}>MB</option><option ${unit === 'GB' ? 'selected' : ''}>GB</option></select>`;
+  } else if (item.kind === 'int' || item.kind === 'float') {
+    control = `<input type="number" step="${item.kind === 'float' ? '0.5' : '1'}" value="${item.value}">`;
+  } else {
+    control = `<input type="text" value="${escapeHtml(String(item.value))}">`;
+  }
+  return `<div class="settings-row" data-setting="${item.key}" data-kind="${item.kind}">
+    <div class="settings-text">
+      <div class="settings-label">${escapeHtml(label)}</div>
+      ${hint ? `<div class="settings-hint">${escapeHtml(hint)}</div>` : ''}
+    </div>
+    <div class="settings-control">${control}</div>
+  </div>`;
+}
+
+function passwordRow() {
+  return `<div class="settings-row stack">
+    <div class="settings-text">
+      <div class="settings-label">${escapeHtml(T('修改管理密码'))}</div>
+      <div class="settings-hint">${escapeHtml(T('至少 10 位；改完当前会话会失效'))}</div>
+    </div>
+    <form id="password-form" class="password-form">
+      <input type="password" id="pw-current" autocomplete="current-password" placeholder="${escapeHtml(T('当前密码'))}">
+      <input type="password" id="pw-new" autocomplete="new-password" placeholder="${escapeHtml(T('新密码'))}">
+      <input type="password" id="pw-confirm" autocomplete="new-password" placeholder="${escapeHtml(T('确认新密码'))}">
+      <button class="ghost" type="submit">${escapeHtml(T('修改密码'))}</button>
+    </form>
+  </div>`;
+}
+
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days) return T('{n} 天 {h} 小时', { n: days, h: hours });
+  if (hours) return T('{n} 小时 {m} 分钟', { n: hours, m: minutes });
+  return T('{n} 分钟', { n: minutes });
+}
+
+function buildSettingsHtml(data, dav) {
+  const groups = {};
+  for (const item of data.items) (groups[item.group] ||= []).push(item);
+  const sys = data.system || {};
+  const tg = sys.telegram || {};
+  const tgReady = tg.state === 'ready';
+  const tgName = tg.user ? '@' + (tg.user.username || tg.user.name) : (tgReady ? T('已连接') : T('未连接'));
+  const theme = currentTheme();
+  const parts = [];
+
+  parts.push(`<p class="settings-intro muted">${escapeHtml(T('这些参数存在服务器上，保存后立即生效。'))}</p>`);
+
+  parts.push(`<section class="settings-group">
+    <div class="settings-group-head">${icon('i-sun')}<h4>${escapeHtml(T('外观'))}</h4></div>
+    <div class="settings-row">
+      <div class="settings-text">
+        <div class="settings-label">${escapeHtml(T('主题'))}</div>
+        <div class="settings-hint">${escapeHtml(T('跟随系统，或固定浅色 / 深色'))}</div>
+      </div>
+      <div class="settings-control"><div class="seg" id="theme-seg">
+        ${[['system', 'i-desktop'], ['light', 'i-sun'], ['dark', 'i-moon']].map(([mode, name]) =>
+          `<button data-theme-mode="${mode}" class="${theme === mode ? 'active' : ''}">${icon(name)}${escapeHtml(T(mode === 'system' ? '跟随系统' : mode === 'light' ? '浅色' : '深色'))}</button>`).join('')}
+      </div></div>
+    </div>
+    <div class="settings-row">
+      <div class="settings-text">
+        <div class="settings-label">${escapeHtml(T('语言'))}</div>
+        <div class="settings-hint">${escapeHtml(T('界面文字，切换后刷新页面'))}</div>
+      </div>
+      <div class="settings-control">
+        <button class="ghost" id="btn-settings-lang">${LANG === 'zh' ? 'English' : '中文'}</button>
+      </div>
+    </div>
+  </section>`);
+
+  for (const [group, items] of Object.entries(groups)) {
+    const meta = GROUP_META[group] || { icon: 'i-settings', zh: group, en: group };
+    parts.push(`<section class="settings-group">
+      <div class="settings-group-head">${icon(meta.icon)}<h4>${escapeHtml(LANG === 'en' ? meta.en : meta.zh)}</h4></div>
+      ${items.map(settingRow).join('')}
+      ${group === 'security' ? passwordRow() : ''}
+    </section>`);
+  }
+
+  parts.push(`<section class="settings-group">
+    <div class="settings-group-head">${icon('i-link')}<h4>${escapeHtml(T('连接'))}</h4></div>
+    <div class="settings-row">
+      <div class="settings-text">
+        <div class="settings-label">Telegram</div>
+        <div class="settings-hint">${escapeHtml(tgName)}</div>
+      </div>
+      <div class="settings-control">
+        <span class="chip ${tgReady ? 'ok' : 'bad'}"><i class="dot"></i>${escapeHtml(tgReady ? T('已连接') : T('未连接'))}</span>
+        ${tgReady ? `<button class="ghost" id="btn-settings-tg-logout">${escapeHtml(T('断开'))}</button>` : ''}
+      </div>
+    </div>
+    ${dav ? `<div class="settings-row">
+      <div class="settings-text">
+        <div class="settings-label">WebDAV</div>
+        <div class="settings-hint">${escapeHtml(T('rclone / Cyberduck / RaiDrive 都能用'))}</div>
+      </div>
+      <div class="settings-control">
+        <button class="ghost" id="btn-dav-rotate">${escapeHtml(T('换密码'))}</button>
+      </div>
+    </div>
+    <div class="settings-row stack">
+      <div class="copy-row"><input id="dav-url" readonly value="${escapeHtml(location.origin + dav.path)}"><button class="ghost" data-copy="dav-url">${escapeHtml(T('复制'))}</button></div>
+      <div class="copy-row"><input id="dav-user" readonly value="${escapeHtml(dav.user)}"><button class="ghost" data-copy="dav-user">${escapeHtml(T('复制'))}</button></div>
+      <div class="copy-row"><input id="dav-pass" readonly value="${escapeHtml(dav.password)}"><button class="ghost" data-copy="dav-pass">${escapeHtml(T('复制'))}</button></div>
+    </div>` : ''}
+  </section>`);
+
+  parts.push(`<section class="settings-group">
+    <div class="settings-group-head">${icon('i-server')}<h4>${escapeHtml(T('系统信息'))}</h4></div>
+    <div class="system-grid">
+      <div class="system-item"><div class="k">${escapeHtml(T('版本'))}</div><div class="v">v${escapeHtml(data.version)}</div></div>
+      <div class="system-item"><div class="k">${escapeHtml(T('运行时长'))}</div><div class="v">${escapeHtml(formatUptime(sys.uptime || 0))}</div></div>
+      <div class="system-item"><div class="k">${escapeHtml(T('磁盘可用'))}</div><div class="v">${bytes(sys.disk_free || 0)} / ${bytes(sys.disk_total || 0)}</div></div>
+      <div class="system-item"><div class="k">${escapeHtml(T('媒体缓存'))}</div><div class="v">${bytes((sys.cache || {}).used || 0)} / ${bytes((sys.cache || {}).capacity || 0)}</div></div>
+      <div class="system-item"><div class="k">Python</div><div class="v">${escapeHtml(sys.python || '—')}</div></div>
+      <div class="system-item" title="${escapeHtml(sys.data_dir || '')}"><div class="k">${escapeHtml(T('数据目录'))}</div><div class="v">${escapeHtml(sys.data_dir || '—')}</div></div>
+    </div>
+  </section>`);
+
+  parts.push(`<div class="save-bar"><button class="primary" id="btn-save-settings">${icon('i-check')}${escapeHtml(T('保存设置'))}</button></div>`);
+  return parts.join('');
+}
+
+function bindSettingsPage() {
+  for (const button of document.querySelectorAll('#theme-seg button')) {
+    button.addEventListener('click', () => {
+      applyTheme(button.dataset.themeMode);
+      for (const other of document.querySelectorAll('#theme-seg button')) {
+        other.classList.toggle('active', other === button);
+      }
+    });
+  }
+  $('btn-settings-lang')?.addEventListener('click', toggleLang);
+  $('btn-settings-tg-logout')?.addEventListener('click', async () => {
+    if (!confirm(T('断开 Telegram？下次需要重新登录。'))) return;
+    try { await api('/api/tg/logout', { method: 'POST' }); location.reload(); }
+    catch (error) { toast(error.message, true); }
+  });
+  $('btn-dav-rotate')?.addEventListener('click', async () => {
+    try {
+      const result = await api('/api/settings/webdav/rotate', { method: 'POST' });
+      $('dav-pass').value = result.password;
+      toast(T('WebDAV 密码已更换'));
+    } catch (error) { toast(error.message, true); }
+  });
+  for (const button of document.querySelectorAll('[data-copy]')) {
+    button.addEventListener('click', async () => {
+      const input = $(button.dataset.copy);
+      try {
+        await navigator.clipboard.writeText(input.value);
+        toast(T('已复制'));
+      } catch (_) {
+        input.select();
+        document.execCommand('copy');
+        toast(T('已复制'));
+      }
+    });
+  }
+  $('password-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const current = $('pw-current').value;
+    const next = $('pw-new').value;
+    if (next !== $('pw-confirm').value) { toast(T('两次输入的新密码不一样'), true); return; }
+    try {
+      await api('/api/settings/password', { method: 'POST', body: { current, new: next } });
+      toast(T('密码已修改，请重新登录'));
+      setTimeout(() => location.reload(), 900);
+    } catch (error) { toast(error.message, true); }
+  });
+  $('btn-save-settings')?.addEventListener('click', async () => {
+    const values = {};
+    for (const row of document.querySelectorAll('#settings-body [data-setting]')) {
+      const key = row.dataset.setting;
+      const kind = row.dataset.kind;
+      if (kind === 'bytes') {
+        const number = Number(row.querySelector('input').value);
+        const unit = row.querySelector('select').value;
+        if (!Number.isFinite(number) || number < 0) { toast(T('数值不对'), true); return; }
+        values[key] = Math.round(number * BYTE_UNITS[unit]);
+      } else if (kind === 'int' || kind === 'float') {
+        const number = Number(row.querySelector('input').value);
+        if (!Number.isFinite(number)) { toast(T('数值不对'), true); return; }
+        values[key] = kind === 'int' ? Math.round(number) : number;
+      } else {
+        values[key] = row.querySelector('input').value.trim();
+      }
+    }
+    const button = $('btn-save-settings');
+    button.disabled = true;
+    try {
+      await api('/api/settings', { method: 'POST', body: { values } });
+      await loadSettings();
+      toast(T('已保存'));
+    } catch (error) {
+      toast(error.message, true);
+      const again = $('btn-save-settings');
+      if (again) again.disabled = false;
+    }
+  });
+}
+
+async function loadSettings() {
+  const [data, dav] = await Promise.all([
+    api('/api/settings'),
+    api('/api/settings/webdav').catch(() => null),
+  ]);
+  state.settingsData = data;
+  applySiteName(data.site_name);
+  $('settings-body').innerHTML = buildSettingsHtml(data, dav);
+  bindSettingsPage();
+}
+
+async function openSettings() {
+  state.page = 'settings';
+  setActiveNav('settings');
+  state.selecting = false;
+  state.selection.clear();
+  updateBatchBar();
+  $('files-page').classList.add('hidden');
+  $('stats-page').classList.add('hidden');
+  $('settings-page').classList.remove('hidden');
+  $('topbar-files').classList.add('hidden');
+  $('folder-title').textContent = T('设置');
+  if (state.statsTimer) { clearInterval(state.statsTimer); state.statsTimer = null; }
+  closeSidebar();
+  try {
+    await loadSettings();
+  } catch (error) {
+    $('settings-body').innerHTML = `<div class="card"><p>${escapeHtml(T('加载失败：{msg}', { msg: error.message }))}</p></div>`;
+  }
+}
 
 /* ---------- dialog ---------- */
 
@@ -1430,24 +1740,7 @@ function closeSidebar() {
   $('sidebar-backdrop').classList.add('hidden');
 }
 
-$('btn-settings').addEventListener('click', async () => {
-  try {
-    const info = await api('/api/settings/webdav');
-    openDialog(`
-      <h3>${escapeHtml(T('WebDAV 挂载'))}</h3>
-      <p class="muted small">${escapeHtml(T('rclone / Cyberduck / RaiDrive 都能用。Windows 资源管理器只认 443，这个端口它挂不上。'))}</p>
-      <label>${escapeHtml(T('地址'))} <input id="dav-url" readonly value="${escapeHtml(location.origin + info.path)}"></label>
-      <label>${escapeHtml(T('用户名'))} <input id="dav-user" readonly value="${escapeHtml(info.user)}"></label>
-      <label>${escapeHtml(T('密码'))} <input id="dav-pass" readonly value="${escapeHtml(info.password)}"></label>
-      <div class="dialog-actions"><button class="ghost" id="dav-rotate">${escapeHtml(T('换密码'))}</button><button class="primary" data-close>${escapeHtml(T('知道了'))}</button></div>
-    `);
-    $('dav-rotate').addEventListener('click', async () => {
-      const result = await api('/api/settings/webdav/rotate', { method: 'POST' });
-      $('dav-pass').value = result.password;
-      toast(T('WebDAV 密码已更换'));
-    });
-  } catch (error) { toast(error.message, true); }
-});
+$('btn-settings').addEventListener('click', () => openSettings());
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register(`${BASE}/sw.js`).catch(() => {});

@@ -36,8 +36,12 @@ See [docs/RISK.md](docs/RISK.md).
 - Delete, move to another folder (forward + delete the original)
 - Share links with optional expiry and optional password on a standalone public page
 - **Chinese and English UI**, one click to switch; share pages follow the browser language
-- **Overview dashboard**: storage used, optional quota meter, lifetime upload/download, 30-day traffic chart, per-folder usage; it lives in the bottom navigation boxes (Files / Overview / Shares / WebDAV), not in the left sidebar
+- **Overview dashboard**: storage used, optional quota meter, lifetime upload/download, 30-day traffic chart, per-folder usage; it lives in the bottom navigation boxes (Files / Overview / Shares / Settings), not in the left sidebar
+- **Settings page in the browser**: site name, quota, part size, temp budget, upload chunk, session lifetime, media cache, prebuffer and the WebDAV user are all editable in the web UI; values are stored in SQLite and take effect immediately. The admin password can be rotated there too, no `.env` edit or restart
+- **Light / dark theme**, following the OS by default; one consistent SVG icon set across files, navigation and settings
 - Responsive UI that works on phones
+
+![Main view](docs/screenshots/ui-files-dark.png)
 
 ## Android app (native)
 
@@ -217,6 +221,26 @@ Click **Overview** in the sidebar:
 > Telegram has no real quota. `STORAGE_QUOTA_BYTES` is only a display denominator and does not block uploads; the actual limit is `MAX_UPLOAD_BYTES`.
 
 ---
+
+### Settings
+
+Open it from the bottom of the sidebar or the bottom navigation. Values live in the SQLite `settings` table and **override the same-named environment variables**, taking effect on the next request:
+
+| Item | Env var | Notes |
+|---|---|---|
+| Site name | `SITE_NAME` | Title bar, sidebar, login page |
+| Max file size | `MAX_UPLOAD_BYTES` | After parts are merged |
+| Display quota | `STORAGE_QUOTA_BYTES` | Dashboard bar only; 0 hides it |
+| Part size | `TELEGRAM_PART_BYTES` | 1.9GB default; Telegram caps at 2GB |
+| Temp budget | `TMP_BUDGET_BYTES` | Must be at least the part size |
+| Upload chunk | `UPLOAD_CHUNK` | Bytes per browser POST |
+| Session lifetime | `SESSION_DAYS` | Days; applies to new logins |
+| Media cache / prebuffer | `MEDIA_CACHE_GB` / `PREBUFFER_MB` | Video seeking; resizing the cache does not interrupt playback |
+| WebDAV user | `WEBDAV_USER` | Rotate the password from the settings page |
+
+Changing the admin password signs out the current session. `ADMIN_PASSWORD` in `.env` is only the bootstrap credential; once rotated, the scrypt hash in the database is authoritative and the old env value no longer works.
+
+![Settings page](docs/screenshots/ui-settings-dark.png)
 
 ## FAQ
 

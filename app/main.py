@@ -13,6 +13,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import platform
+
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import (
     FileResponse,
@@ -24,7 +26,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db, i18n, parts, security, traffic, webdav
+from . import config, db, i18n, parts, security, settings, traffic, webdav
 from .demo_backend import DemoBackend
 from .http_range import RangeNotSatisfiable, if_range_matches, parse_range
 from .media_cache import MediaCache
@@ -41,7 +43,22 @@ app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")
 app.include_router(webdav.router, prefix="/dav")
 
 backend = DemoBackend() if config.DEMO_MODE else TelegramBackend()
+APP_VERSION = "11.0.0"
 media_cache = MediaCache(config.CACHE_DIR / "media", int(config.MEDIA_CACHE_GB * 1024**3))
+STARTED_AT = time.time()
+
+
+def _apply_cache_size(gb: float) -> None:
+    """Resize the media cache in place.
+
+    Rebuilding MediaCache would wipe the on-disk blocks (its constructor
+    clears the directory), which would yank the file out from under anyone
+    currently streaming. Updating the ceiling and evicting is enough.
+    """
+    media_cache.set_capacity(int(float(gb) * 1024**3))
+
+
+settings.on_change("media_cache_gb", _apply_cache_size)
 SHARE_COOKIE = "hd_share"
 UPLOAD_SESSIONS: dict[str, dict[str, Any]] = {}
 UPLOAD_LOCKS: dict[str, asyncio.Lock] = {}
@@ -180,6 +197,7 @@ async def _refresh_storage() -> None:
 async def _startup() -> None:
     global TRAFFIC_TASK
     db.init_db()
+    settings.apply_all()
     _restore_uploads()
     db.job_prune()
     await backend.start()
@@ -340,7 +358,12 @@ async def readyz(request: Request) -> JSONResponse:
 @app.get("/api/session")
 async def session_info(request: Request) -> dict[str, Any]:
     authed = security.verify_session(request.cookies.get(security.COOKIE_NAME))
-    info: dict[str, Any] = {"authenticated": authed, "demo": config.DEMO_MODE}
+    info: dict[str, Any] = {
+        "authenticated": authed,
+        "demo": config.DEMO_MODE,
+        "site_name": config.SITE_NAME,
+        "version": APP_VERSION,
+    }
     if authed:
         info["telegram"] = await backend.status()
     return info
@@ -1304,6 +1327,62 @@ async def share_item_raw(request: Request, token: str, message_id: int,
     if not _share_ok(request, share):
         raise HTTPException(403, "需要密码")
     return await media_response(share["folder_id"], message_id, request, inline=bool(inline))
+
+
+# ---- runtime settings ----------------------------------------------------
+
+@app.get("/api/settings")
+async def get_settings(request: Request) -> JSONResponse:
+    guard(request)
+    status = await backend.status()
+    try:
+        usage = shutil.disk_usage(config.DATA_DIR)
+        disk_total, disk_free = usage.total, usage.free
+    except OSError:
+        disk_total = disk_free = 0
+    payload = {
+        "version": APP_VERSION,
+        "site_name": config.SITE_NAME,
+        "demo": config.DEMO_MODE,
+        "items": settings.describe(),
+        "system": {
+            "data_dir": str(config.DATA_DIR),
+            "disk_total": disk_total,
+            "disk_free": disk_free,
+            "python": platform.python_version(),
+            "uptime": max(0, int(time.time() - STARTED_AT)),
+            "telegram": status,
+            "cache": media_cache.stats(),
+        },
+    }
+    response = JSONResponse(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/settings")
+async def update_settings(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+    guard(request, mutation=True)
+    values = payload.get("values")
+    if not isinstance(values, dict) or not values:
+        raise HTTPException(400, "没有要保存的设置")
+    errors = settings.save(values)
+    if errors:
+        raise HTTPException(400, "；".join(errors))
+    logger.info("settings updated: %s", ", ".join(sorted(values)))
+    return {"ok": True, "items": settings.describe()}
+
+
+@app.post("/api/settings/password")
+async def update_password(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+    guard(request, mutation=True)
+    error = settings.set_admin_password(
+        str(payload.get("current") or ""), str(payload.get("new") or "")
+    )
+    if error:
+        raise HTTPException(400, error)
+    logger.info("admin password rotated")
+    return {"ok": True}
 
 
 # ---- webdav settings -----------------------------------------------------
