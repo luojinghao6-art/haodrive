@@ -1,0 +1,36 @@
+[Unit]
+Description=HaoDrive (Telegram drive web app)
+Documentation=https://github.com/luojinghao6-art/haodrive
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@PREFIX@
+EnvironmentFile=@PREFIX@/.env
+Environment=DATA_DIR=@PREFIX@/data
+ExecStart=@PREFIX@/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port @PORT@ --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header
+Restart=always
+RestartSec=3
+
+# 上传/下载都是长连接，别让 systemd 的默认值把文件句柄掐掉
+LimitNOFILE=65536
+# 注意：不要在这里加 MemoryMax。流式上传每路最多占 32MB 内存缓冲，
+# 并发上传一多很容易超过 1G，systemd 会直接把进程杀掉。
+
+# 只允许写自己的 data 目录，其余全部只读
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@PREFIX@/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

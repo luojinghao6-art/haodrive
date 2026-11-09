@@ -117,6 +117,24 @@ Firefox, Safari and some Android browsers do not expose the File System Access A
 
 ---
 
+## Deployment options
+
+Docker is optional. Five ways, all documented in **[docs/DEPLOY.md](docs/DEPLOY.md)**:
+
+| Option | Best for | Notes |
+|---|---|---|
+| **systemd + Caddy** | A VPS with a domain | Recommended; what production runs. `deploy/install.sh` does it all |
+| **systemd + nginx** | People already running nginx | Start from `deploy/nginx/haodrive.conf` |
+| **No public IP** | Home broadband / NAS | Cloudflare Tunnel or frp; local Caddy keeps the secret-path prefix |
+| **Windows, locally** | Just want to try it | `deploy\windows\run-haodrive.ps1` |
+| **Docker** | No Python on the host | The section below |
+
+> The reverse proxy must disable request-body buffering
+> (`proxy_request_buffering off` in nginx); otherwise the v11.1 streaming
+> upload degrades into "receive everything, then forward".
+
+---
+
 ## Deploy with Docker in five minutes
 
 ### 1. Domain

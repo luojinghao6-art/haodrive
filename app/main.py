@@ -46,7 +46,7 @@ app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")
 app.include_router(webdav.router, prefix="/dav")
 
 backend = DemoBackend() if config.DEMO_MODE else TelegramBackend()
-APP_VERSION = "11.1.0"
+APP_VERSION = "11.2.0"
 media_cache = MediaCache(config.CACHE_DIR / "media", int(config.MEDIA_CACHE_GB * 1024**3))
 STARTED_AT = time.time()
 

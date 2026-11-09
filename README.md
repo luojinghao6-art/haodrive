@@ -115,6 +115,23 @@ Firefox / Safari / 部分安卓浏览器没有 File System Access API，会自�
 
 ---
 
+## 部署方式一览
+
+不一定要用 Docker。五种方式按环境挑，详细步骤都在 **[docs/DEPLOY.md](docs/DEPLOY.md)**：
+
+| 方式 | 适合谁 | 说明 |
+|---|---|---|
+| **systemd + Caddy** | 有 VPS、有域名 | 推荐；线上就是这套，`deploy/install.sh` 一键装 |
+| **systemd + nginx** | 已经用 nginx 的人 | `deploy/nginx/haodrive.conf` 直接抄 |
+| **公网 IP 都没有** | 家里宽带 / NAS | Cloudflare Tunnel、frp，本机 Caddy 保留密钥路径 |
+| **Windows 本机** | 想先跑起来看看 | `deploy\windows\run-haodrive.ps1` |
+| **Docker** | 不想碰 Python | 下面这一节 |
+
+> 反代必须关掉请求体缓冲（nginx 的 `proxy_request_buffering off`），
+> 否则 v11.1 的流式上传会退化成"先收完再转发"。
+
+---
+
 ## 部署（Docker，五分钟）
 
 ### 1. 域名

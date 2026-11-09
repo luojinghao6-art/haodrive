@@ -8,7 +8,7 @@
 	@app path /{$SECRET_PATH}/*
 	handle @app {
 		uri strip_prefix /{$SECRET_PATH}
-		reverse_proxy app:8000 {
+		reverse_proxy {$UPSTREAM:app:8000} {
 			flush_interval -1
 			header_up X-Forwarded-Prefix /{$SECRET_PATH}
 		}
@@ -16,7 +16,7 @@
 
 	@share path /s/*
 	handle @share {
-		reverse_proxy app:8000 {
+		reverse_proxy {$UPSTREAM:app:8000} {
 			flush_interval -1
 		}
 	}

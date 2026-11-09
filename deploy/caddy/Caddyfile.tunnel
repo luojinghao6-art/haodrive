@@ -1,0 +1,50 @@
+# 没有公网 IP / 在家里跑时用的 Caddy 配置。
+#
+# 它只在回环地址上开一个明文端口，负责两件事：
+#   1. 保持「站点只在一个随机路径下响应」这个行为（strip_prefix）
+#   2. 把流式上传/下载原样转发（不缓冲请求体）
+#
+# 公网入口交给隧道，例如 cloudflared：
+#   cloudflared tunnel --url http://127.0.0.1:8080
+# 也可以换成 frp / ngrok / tailscale funnel，只要能转到这个端口。
+#
+# 启动：
+#   SECRET_PATH=$(grep '^SECRET_PATH=' .env | cut -d= -f2) \
+#   UPSTREAM=127.0.0.1:8000 \
+#   caddy run --config deploy/caddy/Caddyfile.tunnel
+#
+# 注意：隧道那一侧必须自己处理 HTTPS（cloudflared 会自动给你一个
+# https://xxx.trycloudflare.com 或者绑定自己的域名）。
+
+http://127.0.0.1:8080 {
+	encode zstd gzip
+
+	redir /{$SECRET_PATH} /{$SECRET_PATH}/ 308
+
+	@app path /{$SECRET_PATH}/*
+	handle @app {
+		uri strip_prefix /{$SECRET_PATH}
+		reverse_proxy {$UPSTREAM:127.0.0.1:8000} {
+			flush_interval -1
+			header_up X-Forwarded-Prefix /{$SECRET_PATH}
+		}
+	}
+
+	@share path /s/*
+	handle @share {
+		reverse_proxy {$UPSTREAM:127.0.0.1:8000} {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+}
