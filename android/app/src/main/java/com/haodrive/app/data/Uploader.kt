@@ -17,6 +17,7 @@ class Uploader(private val api: Api) {
         val total: Long,
         val part: Int,
         val parts: Int,
+        val bytesPerSecond: Long = 0,
     )
 
     suspend fun upload(
@@ -35,6 +36,7 @@ class Uploader(private val api: Api) {
         val partBytes = limits.partBytes.coerceAtLeast(1)
         val parts = (((size + partBytes - 1) / partBytes).toInt()).coerceAtLeast(1)
         val groupKey = UUID.randomUUID().toString().replace("-", "")
+        val meter = SpeedMeter()
         withContext(Dispatchers.IO) {
         val stream = resolver.openInputStream(uri) ?: throw IOException("无法打开文件")
         stream.use {
@@ -44,7 +46,7 @@ class Uploader(private val api: Api) {
                 val created = createPartWithRetry(folderId, name, size, partBytes, groupKey, index, parts)
                 if (created.optString("state") == "done") {
                     sentTotal += partSize
-                    onProgress(Progress(sentTotal, size, index + 1, parts))
+                    onProgress(Progress(sentTotal, size, index + 1, parts, meter.last()))
                     continue
                 }
                 val uploadId = created.optString("id")
@@ -62,12 +64,13 @@ class Uploader(private val api: Api) {
                         read += n
                     }
                     offset = api.putChunk(uploadId, offset, buffer, read)
-                    onProgress(Progress(sentTotal + offset, size, index + 1, parts))
+                    onProgress(Progress(sentTotal + offset, size, index + 1, parts,
+                        meter.sample(sentTotal + offset)))
                 }
                 sentTotal += partSize
                 val jobId = api.completeUpload(uploadId)
                 waitJob(jobId)
-                onProgress(Progress(sentTotal, size, index + 1, parts))
+                onProgress(Progress(sentTotal, size, index + 1, parts, meter.last()))
             }
         }
         }
@@ -101,6 +104,36 @@ class Uploader(private val api: Api) {
             }
         }
         throw ApiException("上传超时")
+    }
+}
+
+/** Short EMA over half-second windows, so the number does not jump per chunk. */
+class SpeedMeter {
+    private var lastBytes = 0L
+    private var lastNanos = System.nanoTime()
+    private var speed = 0.0
+
+    fun sample(bytes: Long): Long {
+        val now = System.nanoTime()
+        val seconds = (now - lastNanos) / 1_000_000_000.0
+        if (seconds >= 0.5) {
+            val instant = ((bytes - lastBytes) / seconds).coerceAtLeast(0.0)
+            speed = if (speed > 0) speed * 0.6 + instant * 0.4 else instant
+            lastBytes = bytes
+            lastNanos = now
+        }
+        return speed.toLong()
+    }
+
+    fun last(): Long = speed.toLong()
+}
+
+fun formatSpeed(bytesPerSecond: Long): String {
+    if (bytesPerSecond <= 0) return ""
+    return if (bytesPerSecond >= 1024 * 1024) {
+        "%.1f MB/s".format(bytesPerSecond / 1024.0 / 1024.0)
+    } else {
+        "${maxOf(1, bytesPerSecond / 1024)} KB/s"
     }
 }
 

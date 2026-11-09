@@ -517,6 +517,36 @@ function downloadDirect(file, folderId) {
   link.remove();
 }
 
+/* Transfer speed: a short EMA over half-second windows so the number does not
+   jump around on every chunk.  Returns bytes per second. */
+function makeSpeedMeter() {
+  let lastBytes = 0;
+  let lastAt = performance.now();
+  let speed = 0;
+  return (bytes) => {
+    const now = performance.now();
+    const seconds = (now - lastAt) / 1000;
+    if (seconds >= 0.5) {
+      const instant = Math.max(0, (bytes - lastBytes) / seconds);
+      speed = speed > 0 ? speed * 0.6 + instant * 0.4 : instant;
+      lastBytes = bytes;
+      lastAt = now;
+    }
+    return speed;
+  };
+}
+
+function formatSpeed(bytesPerSecond) {
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return '';
+  if (bytesPerSecond >= 1024 * 1024) return `${(bytesPerSecond / 1024 / 1024).toFixed(1)} MB/s`;
+  return `${Math.max(1, Math.round(bytesPerSecond / 1024))} KB/s`;
+}
+
+function speedSuffix(bytesPerSecond) {
+  const text = formatSpeed(bytesPerSecond);
+  return text ? ` · ${text}` : '';
+}
+
 function makeTransferRow(name, kind) {
   $('upload-panel').classList.remove('hidden');
   const row = document.createElement('div');
@@ -568,11 +598,13 @@ async function downloadFile(file) {
   let received = 0;
   let partGot = 0;
   const total = Number(file.size) || 1;
+  const meter = makeSpeedMeter();
 
   function paint() {
     const percent = Math.round(((received + partGot) / total) * 100);
     transfer.paint(percent);
-    transfer.setStatus(T('下载中 {p}%', { p: Math.min(100, percent) }));
+    transfer.setStatus(T('下载中 {p}%', { p: Math.min(100, percent) })
+      + speedSuffix(meter(received + partGot)));
   }
 
   const cancel = document.createElement('button');
@@ -857,6 +889,7 @@ async function startUpload(file) {
   let sessionId = null;
   let partBytes = 0;
   let doneBytes = 0;
+  const meter = makeSpeedMeter();
 
   const cancel = document.createElement('button');
   cancel.className = 'ghost icon';
@@ -998,19 +1031,21 @@ async function startUpload(file) {
           const overall = (doneBytes + offset) / (file.size || 1);
           transfer.paint(Math.round(overall * 100));
           const partPercent = Math.round((offset / (partSize || 1)) * 100);
+          const rate = speedSuffix(meter(doneBytes + offset));
           if (streaming) {
             // Bytes leave the browser while Telegram's copy is already moving;
             // show both sides instead of pretending the upload starts after.
             const tgPercent = Math.min(100, Math.round((sentBytes / (partSize || 1)) * 100));
-            transfer.setStatus(T('直传中 {p}%（Telegram {q}%）', { p: partPercent, q: tgPercent }));
+            transfer.setStatus(T('直传中 {p}%（Telegram {q}%）', { p: partPercent, q: tgPercent }) + rate);
           } else {
-            transfer.setStatus(T('上传中 {p}%', { p: partPercent }));
+            transfer.setStatus(T('上传中 {p}%', { p: partPercent }) + rate);
           }
         }
         const job = await api(`/api/uploads/${sessionId}/complete`, { method: 'POST' });
+        const tgMeter = makeSpeedMeter();
         await waitJob(job.id, (sent, total) => {
           const percent = total ? Math.round((sent / total) * 100) : 0;
-          transfer.setStatus(T('上传到 Telegram {p}%', { p: percent }));
+          transfer.setStatus(T('上传到 Telegram {p}%', { p: percent }) + speedSuffix(tgMeter(sent)));
         });
         doneBytes += partSize;
         paint();

@@ -60,7 +60,9 @@ import com.haodrive.app.data.FileItem
 import com.haodrive.app.data.Folder
 import com.haodrive.app.data.Prefs
 import com.haodrive.app.data.Uploader
+import com.haodrive.app.data.DownloadProgress
 import com.haodrive.app.data.formatBytes
+import com.haodrive.app.data.formatSpeed
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -70,6 +72,7 @@ private data class UploadUi(
     val total: Long,
     val part: Int,
     val parts: Int,
+    val bytesPerSecond: Long = 0,
 )
 
 @Composable
@@ -94,7 +97,7 @@ fun FilesScreen(api: Api) {
     var renameItem by remember { mutableStateOf<FileItem?>(null) }
     var deleteItem by remember { mutableStateOf<FileItem?>(null) }
     var pendingDownload by remember { mutableStateOf<FileItem?>(null) }
-    var downloadProgress by remember { mutableStateOf<Pair<Long, Long>?>(null) }
+    var downloadProgress by remember { mutableStateOf<DownloadProgress?>(null) }
     var uploadState by remember { mutableStateOf<UploadUi?>(null) }
 
     fun toast(message: String) {
@@ -148,7 +151,8 @@ fun FilesScreen(api: Api) {
                 uploadState = UploadUi(meta.first, 0, meta.second, 1, 1)
                 try {
                     uploader.upload(context.contentResolver, uri, folderId, meta.first, meta.second) { p ->
-                        uploadState = UploadUi(meta.first, p.sent, p.total, p.part, p.parts)
+                        uploadState = UploadUi(meta.first, p.sent, p.total, p.part, p.parts,
+                            p.bytesPerSecond)
                     }
                     toast("已上传：${meta.first}")
                 } catch (e: Exception) {
@@ -172,10 +176,10 @@ fun FilesScreen(api: Api) {
         pendingDownload = null
         if (uri != null && item != null) {
             scope.launch {
-                downloadProgress = 0L to item.size
+                downloadProgress = DownloadProgress(0L, item.size)
                 try {
-                    downloader.download(context.contentResolver, folderId, item.id, uri) { done, total ->
-                        downloadProgress = done to total
+                    downloader.download(context.contentResolver, folderId, item.id, uri) { p ->
+                        downloadProgress = p
                     }
                     toast("下载完成：${item.name}")
                 } catch (e: Exception) {
@@ -391,9 +395,16 @@ fun FilesScreen(api: Api) {
                     Spacer(Modifier.height(8.dp))
                     LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(6.dp))
+                    val detail = buildString {
+                        append(formatBytes(upload.sent))
+                        append(" / ")
+                        append(formatBytes(upload.total))
+                        if (upload.parts > 1) append(" · 第 ${upload.part}/${upload.parts} 片")
+                        formatSpeed(upload.bytesPerSecond).takeIf { it.isNotEmpty() }
+                            ?.let { append(" · ").append(it) }
+                    }
                     Text(
-                        "${formatBytes(upload.sent)} / ${formatBytes(upload.total)}" +
-                            if (upload.parts > 1) " · 第 ${upload.part}/${upload.parts} 片" else "",
+                        detail,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -405,7 +416,7 @@ fun FilesScreen(api: Api) {
 
     val progress = downloadProgress
     if (progress != null) {
-        val fraction = if (progress.second > 0) (progress.first.toFloat() / progress.second) else 0f
+        val fraction = if (progress.total > 0) (progress.done.toFloat() / progress.total) else 0f
         AlertDialog(
             onDismissRequest = {},
             title = { Text("正在下载") },
@@ -414,7 +425,8 @@ fun FilesScreen(api: Api) {
                     LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "${formatBytes(progress.first)} / ${formatBytes(progress.second)}",
+                        "${formatBytes(progress.done)} / ${formatBytes(progress.total)}" +
+                            formatSpeed(progress.bytesPerSecond).let { if (it.isEmpty()) "" else " · $it" },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
