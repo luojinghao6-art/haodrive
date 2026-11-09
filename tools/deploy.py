@@ -7,6 +7,7 @@ import os
 import sys
 import tarfile
 import time
+from pathlib import Path
 
 import paramiko
 
@@ -15,17 +16,11 @@ USER = os.environ.get("SSH_USER", "root")
 PASSWORD = os.environ["SSH_PASS"]
 ROOT = "/opt/haodrive"
 
+# Enumerate the tree instead of hand-listing it: a forgotten module ships a
+# server that imports fine but silently runs old code.
 FILES = [
-    "app/settings.py",
-    "app/main.py",
-    "app/config.py",
-    "app/security.py",
-    "app/media_cache.py",
-    "app/stream_upload.py",
-    "app/static/index.html",
-    "app/static/style.css",
-    "app/static/app.js",
-    "app/static/i18n.js",
+    *[path.as_posix() for path in sorted(Path("app").glob("*.py"))],
+    *[path.as_posix() for path in sorted(Path("app/static").iterdir()) if path.is_file()],
     "README.md",
     "README.en.md",
 ]
