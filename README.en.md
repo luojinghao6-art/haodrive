@@ -240,6 +240,12 @@ Open it from the bottom of the sidebar or the bottom navigation. Values live in 
 
 Changing the admin password signs out the current session. `ADMIN_PASSWORD` in `.env` is only the bootstrap credential; once rotated, the scrypt hash in the database is authoritative and the old env value no longer works.
 
+If you forget the password set in the UI, delete the stored hash and the `.env` `ADMIN_PASSWORD` takes over again:
+
+```bash
+cd /opt/haodrive && .venv/bin/python3 -c 'import sqlite3; c=sqlite3.connect("data/haodrive.db"); c.execute("DELETE FROM settings WHERE key=?", ("admin_password_hash",)); c.commit()' && systemctl restart haodrive
+```
+
 ![Settings page](docs/screenshots/ui-settings-dark.png)
 
 ## FAQ

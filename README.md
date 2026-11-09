@@ -242,6 +242,12 @@ docker compose up -d --build    # 更新代码后重建
 
 管理密码改完后会作废当前会话，需要重新登录。`.env` 里的 `ADMIN_PASSWORD` 只是首次启动的引导密码，改过之后以数据库里的哈希为准（scrypt），`.env` 里那个旧值不再能登录。
 
+忘记网页里设的新密码时，删掉库里那条哈希就会回退到 `.env` 的 `ADMIN_PASSWORD`：
+
+```bash
+cd /opt/haodrive && .venv/bin/python3 -c 'import sqlite3; c=sqlite3.connect("data/haodrive.db"); c.execute("DELETE FROM settings WHERE key=?", ("admin_password_hash",)); c.commit()' && systemctl restart haodrive
+```
+
 ![设置页](docs/screenshots/ui-settings-dark.png)
 
 ## 常见问题
