@@ -1,0 +1,166 @@
+{
+  "format": "haodrive-map-vectors",
+  "version": 1,
+  "note": "Cross-language fixtures for the HaoDrive mapping rules. Go and Kotlin must both reproduce every expect block exactly. See docs/CLIENTS.md sections 7-8.",
+  "caption_regex": "^\\[TD-PART (\\d+)/(\\d+)\\]$",
+  "part_size_default": 1900000000,
+  "cases": [
+    {
+      "name": "single-file",
+      "messages": [
+        { "id": 100, "file_name": "notes.txt", "size": 10, "caption": "" }
+      ],
+      "expect": [
+        { "name": "notes.txt", "size": 10, "parts": 1, "group_key": 100, "message_ids": [100], "state": "complete" }
+      ]
+    },
+    {
+      "name": "two-parts-complete",
+      "messages": [
+        { "id": 101, "file_name": "a.bin.part001", "size": 100, "caption": "[TD-PART 1/2]" },
+        { "id": 102, "file_name": "a.bin.part002", "size": 50, "caption": "[TD-PART 2/2]" }
+      ],
+      "expect": [
+        { "name": "a.bin", "size": 150, "parts": 2, "group_key": 101, "message_ids": [101, 102], "state": "complete" }
+      ]
+    },
+    {
+      "name": "captions-out-of-order",
+      "messages": [
+        { "id": 103, "file_name": "b.bin.part002", "size": 100, "caption": "[TD-PART 2/3]" },
+        { "id": 104, "file_name": "b.bin.part001", "size": 100, "caption": "[TD-PART 1/3]" },
+        { "id": 105, "file_name": "b.bin.part003", "size": 50, "caption": "[TD-PART 3/3]" }
+      ],
+      "expect": [
+        { "name": "b.bin", "size": 250, "parts": 3, "group_key": 104, "message_ids": [104, 103, 105], "state": "complete" }
+      ]
+    },
+    {
+      "name": "incomplete-upload",
+      "messages": [
+        { "id": 106, "file_name": "c.bin.part001", "size": 100, "caption": "[TD-PART 1/3]" },
+        { "id": 107, "file_name": "c.bin.part003", "size": 100, "caption": "[TD-PART 3/3]" }
+      ],
+      "expect": [
+        { "name": "c.bin", "size": 200, "parts": 3, "group_key": 106, "message_ids": [106, 107], "state": "incomplete" }
+      ]
+    },
+    {
+      "name": "duplicate-part-index-splits-runs",
+      "messages": [
+        { "id": 160, "file_name": "d.bin.part001", "size": 10, "caption": "[TD-PART 1/2]" },
+        { "id": 161, "file_name": "d.bin.part001", "size": 10, "caption": "[TD-PART 1/2]" }
+      ],
+      "expect": [
+        { "name": "d.bin", "size": 10, "parts": 2, "group_key": 160, "message_ids": [160], "state": "incomplete" },
+        { "name": "d.bin", "size": 10, "parts": 2, "group_key": 161, "message_ids": [161], "state": "incomplete" }
+      ]
+    },
+    {
+      "name": "same-name-twice-is-two-files",
+      "messages": [
+        { "id": 110, "file_name": "same.bin.part001", "size": 10, "caption": "[TD-PART 1/2]" },
+        { "id": 111, "file_name": "same.bin.part002", "size": 10, "caption": "[TD-PART 2/2]" },
+        { "id": 112, "file_name": "same.bin.part001", "size": 20, "caption": "[TD-PART 1/2]" },
+        { "id": 113, "file_name": "same.bin.part002", "size": 20, "caption": "[TD-PART 2/2]" }
+      ],
+      "expect": [
+        { "name": "same.bin", "size": 20, "parts": 2, "group_key": 110, "message_ids": [110, 111], "state": "complete" },
+        { "name": "same.bin", "size": 40, "parts": 2, "group_key": 112, "message_ids": [112, 113], "state": "complete" }
+      ]
+    },
+    {
+      "name": "literal-part-suffix-without-caption",
+      "messages": [
+        { "id": 120, "file_name": "x.part001", "size": 10, "caption": "" }
+      ],
+      "expect": [
+        { "name": "x.part001", "size": 10, "parts": 1, "group_key": 120, "message_ids": [120], "state": "complete" }
+      ]
+    },
+    {
+      "name": "legacy-message-without-caption",
+      "messages": [
+        { "id": 121, "file_name": "old.bin", "size": 4096, "caption": "old caption" }
+      ],
+      "expect": [
+        { "name": "old.bin", "size": 4096, "parts": 1, "group_key": 121, "message_ids": [121], "state": "complete" }
+      ]
+    },
+    {
+      "name": "mixed-singles-and-group",
+      "messages": [
+        { "id": 140, "file_name": "late.txt", "size": 5, "caption": "" },
+        { "id": 132, "file_name": "m.bin.part002", "size": 20, "caption": "[TD-PART 2/2]" },
+        { "id": 130, "file_name": "early.txt", "size": 5, "caption": "" },
+        { "id": 131, "file_name": "m.bin.part001", "size": 20, "caption": "[TD-PART 1/2]" }
+      ],
+      "expect": [
+        { "name": "early.txt", "size": 5, "parts": 1, "group_key": 130, "message_ids": [130], "state": "complete" },
+        { "name": "m.bin", "size": 40, "parts": 2, "group_key": 131, "message_ids": [131, 132], "state": "complete" },
+        { "name": "late.txt", "size": 5, "parts": 1, "group_key": 140, "message_ids": [140], "state": "complete" }
+      ]
+    },
+    {
+      "name": "mismatched-part-names-stay-separate",
+      "messages": [
+        { "id": 150, "file_name": "y.bin.part001", "size": 10, "caption": "[TD-PART 1/2]" },
+        { "id": 151, "file_name": "other.bin.part002", "size": 20, "caption": "[TD-PART 2/2]" }
+      ],
+      "expect": [
+        { "name": "y.bin", "size": 10, "parts": 2, "group_key": 150, "message_ids": [150], "state": "incomplete" },
+        { "name": "other.bin", "size": 20, "parts": 2, "group_key": 151, "message_ids": [151], "state": "incomplete" }
+      ]
+    }
+  ],
+  "overlay_cases": [
+    {
+      "name": "rename-and-order",
+      "messages": [
+        { "id": 200, "file_name": "first.txt", "size": 10, "caption": "" },
+        { "id": 210, "file_name": "second.txt", "size": 20, "caption": "" }
+      ],
+      "overlay": "rev: 3\nupdated: 2026-11-09T19:40:00Z\nrename -1001234567890 210 renamed.txt\norder -1001234567890 210 1\n",
+      "expect": [
+        { "name": "renamed.txt", "size": 20, "parts": 1, "group_key": 210, "message_ids": [210], "state": "complete", "order": 1, "renamed": true },
+        { "name": "first.txt", "size": 10, "parts": 1, "group_key": 200, "message_ids": [200], "state": "complete" }
+      ]
+    },
+    {
+      "name": "corrupt-lines-are-ignored",
+      "messages": [
+        { "id": 220, "file_name": "keep.txt", "size": 10, "caption": "" }
+      ],
+      "overlay": "rev: 7\nthis is garbage\nrename\nexpected\nrename -100 220 kept.txt\norder -100 220\n",
+      "expect": [
+        { "name": "kept.txt", "size": 10, "parts": 1, "group_key": 220, "message_ids": [220], "state": "complete", "renamed": true }
+      ]
+    },
+    {
+      "name": "short-form-without-channel",
+      "messages": [
+        { "id": 230, "file_name": "old.txt", "size": 10, "caption": "" }
+      ],
+      "overlay": "rev: 1\nrename 230 new.txt\n",
+      "expect": [
+        { "name": "new.txt", "size": 10, "parts": 1, "group_key": 230, "message_ids": [230], "state": "complete", "renamed": true }
+      ]
+    }
+  ],
+  "merge_cases": [
+    {
+      "name": "higher-revision-wins",
+      "a": "rev: 1\nrename 0 100 old.bin\n",
+      "b": "rev: 2\nrename 0 100 new.bin\n",
+      "expect_rev": 2,
+      "expect_rename": { "100": "new.bin" }
+    },
+    {
+      "name": "later-updated-wins",
+      "a": "rev: 2\nupdated: 2026-11-09T10:00:00Z\nrename 0 100 a.txt\n",
+      "b": "rev: 2\nupdated: 2026-11-09T11:00:00Z\nrename 0 100 b.txt\n",
+      "expect_rev": 2,
+      "expect_rename": { "100": "b.txt" }
+    }
+  ]
+}

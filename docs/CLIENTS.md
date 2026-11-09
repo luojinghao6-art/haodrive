@@ -101,7 +101,7 @@ Two **parallel** worlds that share the same channel and message conventions but 
 
 ## 7. 映射规则 / Mapping rules
 
-**这一节是客户端与服务端的共同契约，改动必须两边同时改。**
+**这一节是客户端与服务端的共同契约，改动必须两边同时改。**服务端自己还额外存了随机的 `group_key`，所以不依赖下文的 run 拆分规则；客户端只靠 caption，必须遵守。
 
 **This section is the shared contract between clients and the server; any change must land on both sides.**
 
@@ -136,6 +136,8 @@ One message is the whole file, under its original name, with no caption.
 2. 对每条：解析 caption 是否匹配 ^\[TD-PART (\d+)/(\d+)\]$
    ├─ 不匹配 → 当作单文件（文件名取消息里的文档名）
    └─ 匹配   → 进入分片池：键 = (去掉 .partNNN 的文件名, N)
+              同一键按消息 id 顺序累积；遇到已经出现过的 i，
+              就开一个新的 run（同名同片数的两次上传靠这个分开）
 3. 池里每个键：按 i 排序，检查 i 是否 1..N 连续
    ├─ 连续 → 合成一个逻辑文件，组键 = 第 1 片 message id
    └─ 不连续 → 标记为「未完成的上传」，医生界面里允许删除或续传
@@ -147,6 +149,8 @@ One message is the whole file, under its original name, with no caption.
 2. For each message, test the caption against ^\[TD-PART (\d+)/(\d+)\]$
    ├─ no match → a single file (name from the document attribute)
    └─ match    → add to the parts pool, keyed by (base name without .partNNN, N)
+                 messages accumulate in id order; a repeated i starts a new run
+                 (this is what separates two uploads of the same name)
 3. Per key: sort by i and check that i is a contiguous 1..N
    ├─ contiguous   → one logical file, group key = first part's message id
    └─ not contiguous → an incomplete upload; allow delete or resume
@@ -156,13 +160,13 @@ One message is the whole file, under its original name, with no caption.
 ### 7.4 边界情况 / Edge cases
 
 - **上传中断**：缺片不合成，显示为「未完成」；补齐后自动变成正常文件
-- **同名文件**：分属不同的组键，各自独立；列表里允许重名
+- **同名文件**：同名同 N 的消息按 id 顺序分成连续的 run，重复的分片序号开始新 run；两次上传完全交错时 caption 信息不足以可靠拆分，会显示为未完成
 - **文件名本身以 `.partNNN` 结尾**：只看 caption，不看文件名，避免误判
 - **历史消息没有 caption**（v10 之前的旧文件）：当作单文件处理
 - **重命名**：Telegram 消息不能改名，只能落在本地；跨设备一致要靠第 8 节的 `map.txt`
 
 - **Interrupted upload**: incomplete parts are not merged and show as "incomplete"; they become a normal file once the missing parts arrive
-- **Duplicate names**: distinct group keys, kept separate; the list allows duplicates
+- **Duplicate names**: messages with the same name and N split into consecutive runs in id order, and a repeated part index starts a new run. If two uploads interleave completely the caption holds too little information to split them reliably, and they show as incomplete
 - **Names that literally end in `.partNNN`**: rely on the caption, never the file name
 - **Legacy messages without captions** (files from before v10): treated as single files
 - **Rename**: Telegram messages cannot be renamed; renames stay local unless the `map.txt` overlay (section 8) is used
