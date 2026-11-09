@@ -131,6 +131,7 @@ const EN = {
   '上传中 {p}%': 'Uploading {p}%',
   '上传到 Telegram…': 'Sending to Telegram…',
   '上传到 Telegram {p}%': 'Sending to Telegram {p}%',
+  '直传中 {p}%（Telegram {q}%）': 'Direct to Telegram {p}% (Telegram {q}%)',
   '排队中…': 'Queued…',
   '第 {i}/{n} 片': 'Part {i}/{n}',
   '{done} / {total} 片': '{done} / {total} parts',

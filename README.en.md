@@ -85,13 +85,20 @@ Browser ──HTTPS──> Caddy ──> FastAPI (uvicorn)
 Pick a file
   ├─ GET /api/parts/limits          part size + 8MB network chunk
   ├─ file.slice() in the browser    never loads the whole file
-  ├─ POST /api/parts                declare part N, server creates a temp file
-  ├─ PUT /api/uploads/{id}?offset   8MB at a time, resumable
-  ├─ POST /api/uploads/{id}/complete send this part to Telegram
-  ├─ Poll the job until it really finished and the temp file was deleted
+  ├─ POST /api/parts                declare part N; large parts open a stream session
+  ├─ PUT /api/uploads/{id}?offset   8MB at a time, forwarded to Telegram as it arrives
+  ├─ POST /api/uploads/{id}/complete finish + send the message (the file is already there)
+  ├─ Poll the job until it really finished
   └─ Next part
 All parts done → server registers one logical file → the list shows one file
 ```
+
+Parts above 10MB are no longer spooled: the HTTP body is cut into 512KB Telegram
+parts on the fly and pushed by four concurrent `SaveBigFilePart` workers. Browser
+and Telegram work at the same time, so the cost drops from
+`browser + Telegram` to `max(browser, Telegram)`. The in-memory buffer is bounded
+(default 32MB); when it fills, reading the socket stops and the browser slows down
+by itself.
 
 After a reload, selecting the same file skips finished parts and resumes an unfinished part from its last offset.
 
@@ -374,8 +381,15 @@ The browser uploads 8MB network chunks; the server validates offsets and persist
 
 - Per-part progress is stored in SQLite, so a restart does not lose it
 - The browser remembers the `group_key`; after a reload or network drop, selecting the same file skips completed parts and resumes from the current offset
-- Each chunk retries 3 times; a failed part keeps its state and offers **Retry** / **Cancel**
+- A streamed part resumes on a 512KB Telegram-part boundary: only a contiguous
+  confirmed run counts, because the unsent tail lives in memory and dies with the process
+- After a restart the same `file_id` is reused, so parts Telegram already accepted
+  are not sent again
+- Each chunk retries 3 times; a failed part keeps its state and offers **Retry** / **Cancel**,
+  and the retry continues from the confirmed boundary
 - Cancelling a whole group deletes the unfinished part messages already sent to Telegram, leaving no junk
+- Speed is tuned in Settings: **Upload concurrency** (default 4, max 16) and
+  **Upload rate limit** (KB/s, 0 = unlimited)
 
 ## Video playback
 
@@ -404,7 +418,7 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-Coverage includes session/share token isolation, Range parsing, legacy chunk upload, client part grouping/hiding/manifest, cross-part Range reads, cancel cleanup, storage/traffic counters, share passwords, the full WebDAV flow, media cache hit/eviction, and the bilingual HTML shell. CI is in `.github/workflows/ci.yml`.
+Coverage includes session/share token isolation, Range parsing, legacy chunk upload, streaming upload (concurrency, backpressure, resume boundary, restart recovery), client part grouping/hiding/manifest, cross-part Range reads, cancel cleanup, storage/traffic counters, share passwords, the full WebDAV flow, media cache hit/eviction, and the bilingual HTML shell. CI is in `.github/workflows/ci.yml`.
 
 ## Operations
 

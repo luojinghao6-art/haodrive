@@ -167,7 +167,10 @@ def init_db() -> None:
             if name not in job_columns:
                 conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
         upload_columns = {row["name"] for row in conn.execute("PRAGMA table_info(uploads)").fetchall()}
-        for name, ddl in (("group_key", "TEXT"), ("part_index", "INTEGER")):
+        for name, ddl in (("group_key", "TEXT"), ("part_index", "INTEGER"),
+                          ("stream", "INTEGER NOT NULL DEFAULT 0"),
+                          ("file_id", "INTEGER"),
+                          ("confirmed", "INTEGER NOT NULL DEFAULT 0")):
             if name not in upload_columns:
                 conn.execute(f"ALTER TABLE uploads ADD COLUMN {name} {ddl}")
     _DB_PATH.chmod(0o600)
@@ -331,15 +334,31 @@ def move_display_name(src_folder: int, src_message: int, dst_folder: int, dst_me
 
 def upload_save(upload_id: str, folder_id: int, name: str, size: int, received: int,
                 created: int, group_key: str | None = None,
-                part_index: int | None = None) -> None:
+                part_index: int | None = None, stream: int = 0,
+                file_id: int | None = None, confirmed: int = 0) -> None:
     with _lock, connect() as conn:
         conn.execute(
-            "INSERT INTO uploads(id, folder_id, name, size, received, created, group_key, part_index) "
-            "VALUES(?,?,?,?,?,?,?,?) "
+            "INSERT INTO uploads(id, folder_id, name, size, received, created, group_key, "
+            "part_index, stream, file_id, confirmed) VALUES(?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET received=excluded.received, "
-            "group_key=excluded.group_key, part_index=excluded.part_index",
-            (upload_id, folder_id, name, size, received, created, group_key, part_index),
+            "group_key=excluded.group_key, part_index=excluded.part_index, "
+            "confirmed=excluded.confirmed, file_id=excluded.file_id, stream=excluded.stream",
+            (upload_id, folder_id, name, size, received, created, group_key, part_index,
+             stream, file_id, confirmed),
         )
+
+
+def upload_set_confirmed(upload_id: str, confirmed: int) -> None:
+    """Persist how far the streaming pump has confirmed bytes to Telegram."""
+    with _lock, connect() as conn:
+        conn.execute("UPDATE uploads SET confirmed=? WHERE id=?",
+                     (int(confirmed), upload_id))
+
+
+def upload_get(upload_id: str) -> dict[str, Any] | None:
+    with _lock, connect() as conn:
+        row = conn.execute("SELECT * FROM uploads WHERE id=?", (upload_id,)).fetchone()
+    return dict(row) if row else None
 
 
 def upload_load_all() -> list[dict[str, Any]]:

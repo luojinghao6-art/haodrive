@@ -21,6 +21,7 @@ FILES = [
     "app/config.py",
     "app/security.py",
     "app/media_cache.py",
+    "app/stream_upload.py",
     "app/static/index.html",
     "app/static/style.css",
     "app/static/app.js",

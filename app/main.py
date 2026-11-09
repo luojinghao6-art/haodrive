@@ -6,6 +6,7 @@ import datetime
 import logging
 import mimetypes
 import os
+import random
 import re
 import shutil
 import time
@@ -25,11 +26,13 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import ClientDisconnect
 
 from . import config, db, i18n, parts, security, settings, traffic, webdav
 from .demo_backend import DemoBackend
 from .http_range import RangeNotSatisfiable, if_range_matches, parse_range
 from .media_cache import MediaCache
+from .stream_upload import STREAM_MIN_BYTES, STREAM_PART, StreamError, StreamUpload
 from .tg_backend import BackendError, TelegramBackend, UploadJob, friendly_error
 
 logging.basicConfig(
@@ -43,7 +46,7 @@ app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")
 app.include_router(webdav.router, prefix="/dav")
 
 backend = DemoBackend() if config.DEMO_MODE else TelegramBackend()
-APP_VERSION = "11.0.0"
+APP_VERSION = "11.1.0"
 media_cache = MediaCache(config.CACHE_DIR / "media", int(config.MEDIA_CACHE_GB * 1024**3))
 STARTED_AT = time.time()
 
@@ -68,6 +71,57 @@ SHARE_SAFE_INLINE = {"image", "video", "audio", "pdf"}
 
 # ---- lifecycle -----------------------------------------------------------
 
+def _drop_stream_session(upload_id: str) -> None:
+    UPLOAD_SESSIONS.pop(upload_id, None)
+    UPLOAD_LOCKS.pop(upload_id, None)
+
+
+def _restore_stream(row: dict[str, Any], now: float) -> None:
+    """Rebuild a live-to-Telegram session after a restart.
+
+    The bytes between the last confirmed SaveBigFilePart and the browser's old
+    offset are gone, so the session restarts at that part boundary and the
+    browser re-sends from there.  Telegram keeps the already-accepted parts
+    for a while, so the work done before the restart is not lost.
+    """
+    upload_id = row["id"]
+    group_key = row.get("group_key")
+    part_index = row.get("part_index")
+    if now - row["created"] > 86400 or not row.get("file_id"):
+        db.upload_delete(upload_id)
+        if group_key is not None and part_index is not None:
+            db.part_group_set_state(group_key, part_index, "pending")
+        return
+    group = db.part_group_get(group_key) if group_key is not None else None
+    if group_key is not None:
+        part = next((p for p in db.part_group_parts(group_key)
+                     if p["part_index"] == part_index), None) if group else None
+        if not group or not part or part["state"] == "done":
+            db.upload_delete(upload_id)
+            return
+    resume_parts = int(row.get("confirmed") or 0) // STREAM_PART
+    job = UploadJob(id=upload_id, name=row["name"], folder_id=int(row["folder_id"]),
+                    state="queued", sent=min(int(row["size"]), resume_parts * STREAM_PART),
+                    total=int(row["size"]), group_key=group_key, part_index=part_index,
+                    part_count=int(group["part_count"]) if group else 1)
+    upload = StreamUpload(
+        backend, job, upload_id=upload_id, folder_id=int(row["folder_id"]),
+        name=row["name"], size=int(row["size"]), file_id=int(row["file_id"]),
+        group_key=group_key, part_index=part_index,
+        part_count=int(group["part_count"]) if group else 1,
+        resume_parts=resume_parts, on_finished=_drop_stream_session)
+    backend.jobs[upload_id] = job
+    UPLOAD_SESSIONS[upload_id] = {
+        "folder_id": row["folder_id"], "name": row["name"], "size": row["size"],
+        "path": None, "received": upload.fed, "created": row["created"],
+        "group_key": group_key, "part_index": part_index,
+        "part_count": int(group["part_count"]) if group else 1,
+        "stream": True, "upload": upload,
+    }
+    UPLOAD_LOCKS[upload_id] = asyncio.Lock()
+    logger.info("restored streaming upload %s at %s bytes", row["name"], upload.fed)
+
+
 def _restore_uploads() -> None:
     """Reload resumable sessions from SQLite and drop stale temp files."""
     now = time.time()
@@ -78,6 +132,10 @@ def _restore_uploads() -> None:
         rows = []
     for row in rows:
         upload_id = row["id"]
+        if row.get("stream"):
+            _restore_stream(row, now)
+            known.add(upload_id)
+            continue
         path = config.TMP_DIR / upload_id
         if not path.exists():
             db.upload_delete(upload_id)
@@ -609,18 +667,39 @@ async def create_part(request: Request, payload: dict[str, Any]) -> dict[str, An
                 "message_id": row["message_id"], "size": part_size,
                 "offset": part_size}
 
-    for uid, session in UPLOAD_SESSIONS.items():
-        if session.get("group_key") == group_key and session.get("part_index") == part_index:
-            return {"id": uid, "offset": session["received"], "size": part_size,
-                    "chunk_size": config.UPLOAD_CHUNK, "state": "uploading",
-                    "part_index": part_index, "part_count": part_count}
+    for uid, session in list(UPLOAD_SESSIONS.items()):
+        if session.get("group_key") != group_key or session.get("part_index") != part_index:
+            continue
+        upload = session.get("upload")
+        if upload is not None and upload.state in ("error", "cancelled"):
+            # The pump is dead; resume from the last confirmed part boundary
+            # instead of handing back a session that can never accept data.
+            _drop_stream_session(uid)
+            db.upload_delete(uid)
+            continue
+        return {"id": uid, "offset": session["received"], "size": part_size,
+                "chunk_size": config.UPLOAD_CHUNK, "state": "uploading",
+                "part_index": part_index, "part_count": part_count,
+                "sent": upload.confirmed_bytes if upload is not None else 0,
+                "stream": bool(session.get("stream"))}
 
     stale = db.part_group_upload_session(group_key, part_index)
+    resume_row = None
     if stale:
+        row = db.upload_get(stale["id"])
+        if (row and row.get("stream") and row.get("file_id")
+                and time.time() - int(row["created"]) < 86400):
+            # Keep Telegram's file_id and its confirmed parts: the retry only
+            # has to send the tail, not the whole part again.
+            resume_row = row
         db.upload_delete(stale["id"])
     in_flight = db.job_find_part(group_key, part_index)
     if in_flight:
         raise HTTPException(409, "这一片正在发往 Telegram，等它完成")
+
+    if getattr(backend, "supports_streaming", False) and part_size > STREAM_MIN_BYTES:
+        return _create_stream_part(folder_id, name, part_size, group_key,
+                                   part_index, part_count, resume_row)
 
     used = parts.tmp_usage()
     if used + part_size > config.TMP_BUDGET_BYTES:
@@ -646,6 +725,47 @@ async def create_part(request: Request, payload: dict[str, Any]) -> dict[str, An
             "state": "uploading", "part_index": part_index, "part_count": part_count}
 
 
+def _create_stream_part(folder_id: int, name: str, part_size: int, group_key: str,
+                        part_index: int, part_count: int,
+                        resume_row: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Start a part that goes to Telegram as the browser is still sending it."""
+    uid = uuid.uuid4().hex
+    if resume_row is not None:
+        file_id = int(resume_row["file_id"])
+        resume_parts = int(resume_row.get("confirmed") or 0) // STREAM_PART
+    else:
+        file_id = random.getrandbits(63) or 1
+        resume_parts = 0
+    resume_bytes = min(part_size, resume_parts * STREAM_PART)
+    job = UploadJob(id=uid, name=name, folder_id=folder_id, state="queued",
+                    sent=resume_bytes, total=part_size, group_key=group_key,
+                    part_index=part_index, part_count=part_count)
+    upload = StreamUpload(
+        backend, job, upload_id=uid, folder_id=folder_id, name=name, size=part_size,
+        file_id=file_id, group_key=group_key, part_index=part_index,
+        part_count=part_count, resume_parts=resume_parts,
+        on_finished=_drop_stream_session)
+    backend.jobs[uid] = job
+    session = {"folder_id": folder_id, "name": name, "size": part_size, "path": None,
+               "received": upload.fed, "created": time.time(), "group_key": group_key,
+               "part_index": part_index, "part_count": part_count,
+               "stream": True, "upload": upload}
+    UPLOAD_SESSIONS[uid] = session
+    UPLOAD_LOCKS[uid] = asyncio.Lock()
+    # No temp file: only the file_id has to survive a restart, plus how many
+    # whole parts Telegram has confirmed.
+    db.upload_save(uid, folder_id, name, part_size, upload.fed, int(session["created"]),
+                   group_key, part_index, stream=1, file_id=file_id,
+                   confirmed=resume_bytes)
+    db.part_group_set_state(group_key, part_index, "uploading")
+    logger.info("stream part started: %s part %s/%s (%s bytes, resuming at %s)",
+                name, part_index + 1, part_count, part_size, resume_bytes)
+    return {"id": uid, "offset": upload.fed, "size": part_size,
+            "chunk_size": config.UPLOAD_CHUNK, "state": "uploading",
+            "part_index": part_index, "part_count": part_count,
+            "stream": True, "sent": resume_bytes}
+
+
 @app.delete("/api/parts/{group_key}")
 async def cancel_part_group(request: Request, group_key: str) -> dict[str, Any]:
     guard(request, mutation=True)
@@ -655,10 +775,14 @@ async def cancel_part_group(request: Request, group_key: str) -> dict[str, Any]:
     for uid, session in list(UPLOAD_SESSIONS.items()):
         if session.get("group_key") != group_key:
             continue
+        upload = session.get("upload")
+        if upload is not None:
+            await upload.cancel()
         UPLOAD_SESSIONS.pop(uid, None)
         UPLOAD_LOCKS.pop(uid, None)
         try:
-            session["path"].unlink()
+            if session.get("path") is not None:
+                session["path"].unlink()
         except OSError:
             pass
         db.upload_delete(uid)
@@ -700,8 +824,12 @@ def _purge_uploads() -> None:
     cutoff = time.time() - 86400
     for uid, session in list(UPLOAD_SESSIONS.items()):
         if session["created"] < cutoff:
+            upload = session.get("upload")
+            if upload is not None:
+                asyncio.create_task(upload.cancel())
             try:
-                session["path"].unlink()
+                if session.get("path") is not None:
+                    session["path"].unlink()
             except OSError:
                 pass
             db.upload_delete(uid)
@@ -755,6 +883,44 @@ async def upload_status(request: Request, upload_id: str) -> dict[str, Any]:
     return {"id": upload_id, "offset": session["received"], "size": session["size"]}
 
 
+async def _feed_stream(upload: StreamUpload, session: dict[str, Any], upload_id: str,
+                       request: Request) -> dict[str, Any]:
+    """Pour an HTTP body into a live Telegram upload.
+
+    Waiting on a full buffer is the backpressure: the socket stops being read
+    while Telegram lags, so the browser is throttled to Telegram's pace instead
+    of filling the VPS disk.  A dropped connection is not fatal -- the session
+    stays and the browser resumes from the last confirmed part.
+    """
+    written = 0
+    failure: StreamError | None = None
+    try:
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            await upload.feed(chunk)
+            written += len(chunk)
+            traffic.add(up=len(chunk))
+    except ClientDisconnect:
+        pass
+    except StreamError as error:
+        failure = error
+    finally:
+        session["received"] = upload.fed
+        if written:
+            db.upload_save(upload_id, session["folder_id"], session["name"],
+                           session["size"], session["received"], int(session["created"]),
+                           session.get("group_key"), session.get("part_index"),
+                           stream=1, file_id=upload.file_id,
+                           confirmed=upload.confirmed_bytes)
+    if failure is not None:
+        raise HTTPException(failure.code, failure.message)
+    if upload.error is not None:
+        raise HTTPException(upload.error.code, upload.error.message)
+    return {"offset": upload.fed, "size": session["size"],
+            "sent": upload.confirmed_bytes, "stream": True}
+
+
 @app.put("/api/uploads/{upload_id}")
 async def upload_chunk(request: Request, upload_id: str, offset: int = 0) -> dict[str, Any]:
     guard(request, mutation=True)
@@ -766,6 +932,9 @@ async def upload_chunk(request: Request, upload_id: str, offset: int = 0) -> dic
         if offset != session["received"]:
             return JSONResponse({"detail": "offset mismatch", "offset": session["received"]},
                                 status_code=409)
+        upload = session.get("upload")
+        if upload is not None:
+            return await _feed_stream(upload, session, upload_id, request)
         written = 0
         with session["path"].open("r+b") as handle:
             handle.seek(offset)
@@ -794,7 +963,18 @@ async def complete_upload(request: Request, upload_id: str) -> dict[str, Any]:
             existing = db.job_get(upload_id)
             if existing:
                 return {"id": existing["id"], "name": existing["name"], "total": existing["total"]}
+            live = backend.jobs.get(upload_id)
+            if live is not None:
+                return {"id": live.id, "name": live.name, "total": live.total}
             raise HTTPException(404, "上传会话不存在")
+        upload = session.get("upload")
+        if upload is not None:
+            try:
+                result = await upload.finish()
+            except StreamError as error:
+                raise HTTPException(error.code, error.message)
+            return {"id": result["id"], "name": result["name"],
+                    "total": result["total"], "stream": True}
         actual = session["path"].stat().st_size
         if session["received"] != session["size"] or actual != session["size"]:
             raise HTTPException(409, f"还差 {session['size'] - session['received']} 字节")
@@ -817,8 +997,12 @@ async def abort_upload(request: Request, upload_id: str) -> dict[str, Any]:
         session = UPLOAD_SESSIONS.pop(upload_id, None)
         db.upload_delete(upload_id)
         if session:
+            upload = session.get("upload")
+            if upload is not None:
+                await upload.cancel()
             try:
-                session["path"].unlink()
+                if session.get("path") is not None:
+                    session["path"].unlink()
             except OSError:
                 pass
             if session.get("group_key") is not None and session.get("part_index") is not None:

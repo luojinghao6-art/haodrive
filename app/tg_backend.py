@@ -217,6 +217,7 @@ def describe(message: types.Message) -> dict[str, Any]:
 
 class TelegramBackend:
     name = "telegram"
+    supports_streaming = True
 
     def __init__(self) -> None:
         self.client: TelegramClient | None = None
@@ -875,6 +876,40 @@ class TelegramBackend:
                 str(path), part_size_kb=512, file_size=size, file_name=part_name,
                 progress_callback=(lambda cur, total: progress(cur, total) if progress else None),
             )
+            message = await client.send_file(
+                entity, uploaded, force_document=True,
+                attributes=[DocumentAttributeFilename(file_name=part_name)],
+                caption=caption,
+            )
+        except Exception as error:
+            raise BackendError(friendly_error(error))
+        return describe(message)
+
+    # ---- streaming upload ------------------------------------------------
+    # SaveBigFilePart is what Telethon does internally, one 512KB part per
+    # round trip and strictly serial.  Fanning these out is the whole point of
+    # the stream pipeline: the connection stays busy while the browser is
+    # still feeding bytes.
+
+    async def save_big_part(self, file_id: int, part_index: int,
+                            part_count: int, data: bytes) -> None:
+        client = self._client()
+        request = functions.upload.SaveBigFilePartRequest(
+            file_id, part_index, part_count, data)
+        try:
+            accepted = await client(request)
+        except Exception as error:
+            raise BackendError(friendly_error(error))
+        if not accepted:
+            raise BackendError(f"Telegram 拒收了第 {part_index + 1} 个分块")
+
+    async def send_uploaded(self, folder_id: int, file_id: int, part_count: int,
+                            part_name: str, caption: str) -> dict[str, Any]:
+        """Send a document whose parts already sit in Telegram's DC."""
+        client = self._client()
+        entity = await self._entity(folder_id)
+        uploaded = types.InputFileBig(file_id, part_count, part_name)
+        try:
             message = await client.send_file(
                 entity, uploaded, force_document=True,
                 attributes=[DocumentAttributeFilename(file_name=part_name)],

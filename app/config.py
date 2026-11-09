@@ -41,6 +41,20 @@ PREBUFFER_MB = int(os.getenv("PREBUFFER_MB", "128"))
 WEBDAV_USER = os.getenv("WEBDAV_USER", "haodrive")
 # Chunk size advertised to the web uploader.
 UPLOAD_CHUNK = int(os.getenv("UPLOAD_CHUNK", str(8 * 1024 * 1024)))
+# Uploads above this go straight to Telegram as they arrive (no full-part
+# spool).  Telegram wants a whole-file MD5 below 10MB, so there is nothing to
+# stream for tiny parts; those keep using the spool path.
+STREAM_MIN_BYTES = int(os.getenv("STREAM_MIN_BYTES", str(10 * 1024 * 1024)))
+# 512KB is Telegram's maximum SaveFilePart size; the stream pipeline uses it.
+STREAM_PART_BYTES = int(os.getenv("STREAM_PART_BYTES", str(512 * 1024)))
+# How many 512KB parts may be in flight to Telegram at once.  Telethon's own
+# upload_file() is serial, so this is the knob that actually raises throughput.
+UPLOAD_CONCURRENCY = int(os.getenv("UPLOAD_CONCURRENCY", "4"))
+# In-memory buffer between the HTTP body and Telegram.  Browsers get throttled
+# here on purpose: a full buffer means Telegram is the slow side.
+UPLOAD_BUFFER_BYTES = int(os.getenv("UPLOAD_BUFFER_BYTES", str(32 * 1024 * 1024)))
+# Global cap for the Telegram upload pump, in KB/s; 0 means unlimited.
+UPLOAD_RATE_KBPS = int(os.getenv("UPLOAD_RATE_KBPS", "0"))
 # Cloud-drive quota shown on the dashboard. Telegram has no real quota, so
 # this is only a display denominator; 0 means "no bar, used bytes only".
 STORAGE_QUOTA_BYTES = int(os.getenv("STORAGE_QUOTA_BYTES", "0"))

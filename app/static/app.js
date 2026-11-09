@@ -948,6 +948,8 @@ async function startUpload(file) {
         let offset = Number(session.offset) || 0;
         const chunkSize = Number(session.chunk_size) || Number(limits.chunk_size);
         transfer.setStatus(T('第 {i}/{n} 片', { i: index + 1, n: partCount }));
+        let streaming = false;
+        let sentBytes = 0;
         while (offset < partSize) {
           if (stopped) return;
           const end = Math.min(offset + chunkSize, partSize);
@@ -956,7 +958,9 @@ async function startUpload(file) {
           for (;;) {
             try {
               controller = new AbortController();
-              const timer = setTimeout(() => controller.abort(), 180000);
+              // A streaming PUT can sit behind Telegram's buffer, so give a
+              // stalled pump more room before declaring the chunk dead.
+              const timer = setTimeout(() => controller.abort(), 300000);
               const response = await fetch(`${BASE}/api/uploads/${sessionId}?offset=${offset}`, {
                 method: 'PUT',
                 headers: { ...MUTATION_HEADERS, 'Content-Type': 'application/octet-stream' },
@@ -979,6 +983,10 @@ async function startUpload(file) {
               }
               const data = await response.json();
               offset = Number(data.offset);
+              if (data.stream) {
+                streaming = true;
+                sentBytes = Number(data.sent) || 0;
+              }
               break;
             } catch (error) {
               if (stopped) return;
@@ -989,7 +997,15 @@ async function startUpload(file) {
           }
           const overall = (doneBytes + offset) / (file.size || 1);
           transfer.paint(Math.round(overall * 100));
-          transfer.setStatus(T('上传中 {p}%', { p: Math.round((offset / (partSize || 1)) * 100) }));
+          const partPercent = Math.round((offset / (partSize || 1)) * 100);
+          if (streaming) {
+            // Bytes leave the browser while Telegram's copy is already moving;
+            // show both sides instead of pretending the upload starts after.
+            const tgPercent = Math.min(100, Math.round((sentBytes / (partSize || 1)) * 100));
+            transfer.setStatus(T('直传中 {p}%（Telegram {q}%）', { p: partPercent, q: tgPercent }));
+          } else {
+            transfer.setStatus(T('上传中 {p}%', { p: partPercent }));
+          }
         }
         const job = await api(`/api/uploads/${sessionId}/complete`, { method: 'POST' });
         await waitJob(job.id, (sent, total) => {

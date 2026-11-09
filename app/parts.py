@@ -1,7 +1,10 @@
 """Client-side multipart upload bookkeeping and the rolling server spool.
 
-Two upload paths share the same rule: no matter how large the logical file is,
-only one Telegram-sized part may sit under data/tmp at any moment.
+Parts above 10MB never reach this spool: app.stream_upload pushes them to
+Telegram while the browser is still sending (see that module).  What is left
+here is the legacy rolling spool used by scripted clients, WebDAV and the
+small tail part of a sliced upload -- at most one Telegram-sized part sits
+under data/tmp at any moment.
 """
 from __future__ import annotations
 

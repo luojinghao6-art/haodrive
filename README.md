@@ -85,13 +85,18 @@ cd android
 选文件
   ├─ GET /api/parts/limits          拿每片大小 / 8MB 网络块大小
   ├─ 浏览器 file.slice() 切片       不读进内存
-  ├─ POST /api/parts                声明第 N 片，服务端建临时文件
-  ├─ PUT  /api/uploads/{id}?offset 8MB 一块传，支持断点
-  ├─ POST /api/uploads/{id}/complete 发到 Telegram
-  ├─ 轮询 job，等这片真正发完、临时文件删除
+  ├─ POST /api/parts                声明第 N 片；大分片当场开流式会话
+  ├─ PUT  /api/uploads/{id}?offset 8MB 一块传，服务端边收边发往 Telegram
+  ├─ POST /api/uploads/{id}/complete 收尾 + 发消息（此时文件已经在 TG 上）
+  ├─ 轮询 job，等这片真正发完
   └─ 下一片
 所有片完成 → 服务端登记逻辑文件 → 列表里是一个文件
 ```
+
+大于 10MB 的分片不再落盘：HTTP 体一到就被切成 512KB 的 Telegram 分块，
+由 4 个工作线程并发 `SaveBigFilePart`。浏览器和 Telegram 同时在干活，总耗时从
+`浏览器 + Telegram` 变成 `max(浏览器, Telegram)`；内存缓冲有界（默认 32MB），
+缓冲满了就自然卡住浏览器，不需要额外的限流也能压住磁盘占用。
 
 刷新页面后重新选同一个文件，已完成的片会跳过，未完成的片从上次 offset 继续。
 
@@ -376,8 +381,13 @@ rclone ls haodrive:
 
 - 每一片的进度存在 SQLite，服务重启也不会丢
 - 浏览器记住 `group_key`，刷新/断网后重新选同一个文件，会跳过已完成的片，从当前片的 offset 继续
-- 每块失败自动重试 3 次；整片失败会保留状态，界面上有「重试」和「取消」
+- 流式分片的 offset 以 512KB 的 Telegram 分块为界：只认「连续确认」的那一段，
+  因为还没发出去的尾巴只在内存里，进程一死就没了
+- 服务重启后沿用原来的 `file_id` 和已确认的偏移，Telegram 已经收下的块不会重发
+- 每块失败自动重试 3 次；整片失败会保留状态，界面上有「重试」和「取消」，
+  重试从已确认的边界接着发
 - 取消整组会删掉已经发到 Telegram 的未完成分片消息，不留垃圾
+- 速度调节在网页设置页：**上传并发**（默认 4，最大 16）和**上传限速**（KB/s，0 不限）
 
 ## 视频播放
 
@@ -406,7 +416,7 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-覆盖：会话/分享令牌隔离、Range 解析、旧版分片上传、客户端分片分组/隐藏/manifest、跨片 Range 读取、取消清理、存储与流量统计、分享密码、WebDAV 全流程、媒体缓存命中与淘汰、双语页面壳。CI 配置在 `.github/workflows/ci.yml`。
+覆盖：会话/分享令牌隔离、Range 解析、旧版分片上传、流式上传的并发/背压/断点边界/重启恢复、客户端分片分组/隐藏/manifest、跨片 Range 读取、取消清理、存储与流量统计、分享密码、WebDAV 全流程、媒体缓存命中与淘汰、双语页面壳。CI 配置在 `.github/workflows/ci.yml`。
 
 ## 运维
 
