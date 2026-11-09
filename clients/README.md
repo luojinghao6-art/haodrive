@@ -19,11 +19,11 @@ clients/
 |---|---|
 | M0 规范 + 测试样本 | ✅ `spec/vectors.json`，Go 侧全部通过 |
 | M1 Go 核心（映射层） | ✅ `internal/hdmap` + `hdc` 命令行 |
-| M1 Go 核心（Telegram 传输） | ⬜ 下一步：登录、拉消息、上传、下载 |
-| M2 Windows GUI | ⬜ |
-| M3 Linux 二进制 | ⬜ |
-| M4 Android | ⬜ |
-| M5 map.txt 覆盖层 | ✅ 解析/合并/应用已实现并测试（等传输层接上） |
+| M1 Go 核心（Telegram 传输） | ✅ 登录/列频道/上传切片/按 Range 下载（代码完成，待真账号验证） |
+| M2 Windows GUI | ✅ 本地 Web UI + `HaoDrive.exe` |
+| M3 Linux 二进制 | ✅ 交叉编译单文件 |
+| M4 Android | ⬜ 需要 TDLib，下一轮 |
+| M5 map.txt 覆盖层 | ✅ 解析/合并/应用已实现并测试（UI 尚未接） |
 
 ## 跑起来
 

@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HaoDrive 客户端</title>
+<style>
+  :root {
+    --bg: #0f1117; --card: #171a22; --line: #262b36; --text: #e7eaf0;
+    --muted: #8b93a7; --accent: #4f8cff; --ok: #2fbf71; --bad: #ff5c5c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px;
+           padding: 14px 20px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .grow { flex: 1; }
+  main { max-width: 980px; margin: 0 auto; padding: 20px; }
+  .card { background: var(--card); border: 1px solid var(--line);
+          border-radius: 12px; padding: 18px; margin-bottom: 16px; }
+  .card h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; color: var(--muted); }
+  label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
+  input[type=text], input[type=password], input[type=number], select {
+    width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--line);
+    background: #0c0e13; color: var(--text); font-size: 14px;
+  }
+  button { border: 0; border-radius: 8px; padding: 9px 16px; font-size: 14px;
+           background: var(--accent); color: #fff; cursor: pointer; }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .muted { color: var(--muted); }
+  .bad { color: var(--bad); }
+  .ok { color: var(--ok); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .bar { height: 6px; background: #0c0e13; border-radius: 3px; overflow: hidden; margin-top: 8px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .hidden { display: none !important; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>HaoDrive</h1>
+  <span class="pill" id="state-pill">未登录</span>
+  <span class="grow"></span>
+  <span class="muted" id="user-label"></span>
+  <button class="ghost hidden" id="logout">退出登录</button>
+</header>
+
+<main>
+  <section class="card" id="login-card">
+    <h2>登录 Telegram</h2>
+    <p class="muted" style="margin-top:0">
+      用自己的 api_id / api_hash（my.telegram.org 建的应用）。数据只存在本机，不经过服务器。
+    </p>
+    <label>api_id</label>
+    <input type="number" id="api-id" placeholder="12345678">
+    <label>api_hash</label>
+    <input type="text" id="api-hash" placeholder="32 位十六进制">
+    <label>手机号（带国家码）</label>
+    <input type="text" id="phone" placeholder="+8613800000000">
+    <div class="row" style="margin-top:14px">
+      <button id="login">连接</button>
+      <span class="muted" id="login-hint"></span>
+    </div>
+  </section>
+
+  <section class="card hidden" id="code-card">
+    <h2>输入验证码</h2>
+    <p class="muted" style="margin-top:0">验证码可能发在 Telegram 客户端里，而不是短信。</p>
+    <input type="text" id="code" placeholder="12345">
+    <div class="row" style="margin-top:12px"><button id="submit-code">提交</button></div>
+  </section>
+
+  <section class="card hidden" id="password-card">
+    <h2>两步验证</h2>
+    <input type="password" id="password" placeholder="两步验证密码">
+    <div class="row" style="margin-top:12px"><button id="submit-password">提交</button></div>
+  </section>
+
+  <section class="card hidden" id="files-card">
+    <div class="row">
+      <div class="grow">
+        <label style="margin-top:0">文件夹</label>
+        <select id="channel"></select>
+      </div>
+      <div>
+        <label style="margin-top:0">&nbsp;</label>
+        <button class="ghost" id="refresh">刷新</button>
+      </div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <input type="file" id="file-input">
+      <button id="upload">上传</button>
+    </div>
+    <div class="bar hidden" id="upload-bar"><div></div></div>
+    <div class="muted" id="upload-status" style="margin-top:6px"></div>
+    <table style="margin-top:14px">
+      <thead><tr><th>名称</th><th>大小</th><th>分片</th><th>状态</th><th></th></tr></thead>
+      <tbody id="files"></tbody>
+    </table>
+    <p class="muted hidden" id="empty">这个文件夹还是空的。</p>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let channels = [];
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' }, ...options,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `请求失败 (${response.status})`);
+  return data;
+}
+
+function formatBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = n, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function show(id, visible) { $(id).classList.toggle('hidden', !visible); }
+
+async function loadConfig() {
+  try {
+    const config = await api('/api/config');
+    if (config.api_id) $('api-id').value = config.api_id;
+    if (config.api_hash) $('api-hash').value = config.api_hash;
+    if (config.phone) $('phone').value = config.phone;
+  } catch (_) { /* first run */ }
+}
+
+async function pollState() {
+  try {
+    const state = await api('/api/state');
+    $('state-pill').textContent = ({
+      idle: '未登录', starting: '连接中…', awaiting_code: '等验证码',
+      awaiting_password: '等两步验证', ready: '已登录', error: '出错',
+    })[state.status] || state.status;
+    $('state-pill').className = 'pill ' + (state.status === 'ready' ? 'ok' : state.status === 'error' ? 'bad' : '');
+    $('user-label').textContent = state.user || '';
+    $('login-hint').textContent = state.error || '';
+    $('login-hint').className = state.error ? 'bad' : 'muted';
+    show('login-card', state.status === 'idle' || state.status === 'error');
+    show('code-card', state.status === 'awaiting_code');
+    show('password-card', state.status === 'awaiting_password');
+    show('logout', state.status === 'ready');
+    if (state.status === 'ready') {
+      show('files-card', true);
+      if (!channels.length) await loadChannels();
+    } else {
+      show('files-card', false);
+    }
+  } catch (error) {
+    $('login-hint').textContent = error.message;
+  }
+}
+
+async function loadChannels() {
+  const data = await api('/api/channels');
+  channels = data.channels || [];
+  const select = $('channel');
+  select.innerHTML = channels
+    .map((item) => `<option value="${item.id}">${item.title}</option>`).join('');
+  if (channels.length) await loadFiles();
+}
+
+function currentChannel() { return Number($('channel').value) || 0; }
+
+async function loadFiles() {
+  const id = currentChannel();
+  if (!id) return;
+  const data = await api(`/api/channels/${id}/files`);
+  const rows = (data.files || []).map((file) => {
+    const done = file.state === 'complete';
+    return `<tr>
+      <td>${escapeHtml(file.name)}</td>
+      <td>${formatBytes(file.size)}</td>
+      <td>${file.parts}</td>
+      <td>${done ? '<span class="ok">完整</span>' : '<span class="bad">未完成</span>'}</td>
+      <td>${done ? `<a href="/api/channels/${id}/files/${file.group_key}/download">下载</a>` : ''}</td>
+    </tr>`;
+  });
+  $('files').innerHTML = rows.join('');
+  show('empty', rows.length === 0);
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+$('login').addEventListener('click', async () => {
+  $('login').disabled = true;
+  try {
+    await api('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        api_id: Number($('api-id').value),
+        api_hash: $('api-hash').value.trim(),
+        phone: $('phone').value.trim(),
+      }),
+    });
+  } catch (error) {
+    $('login-hint').textContent = error.message;
+    $('login-hint').className = 'bad';
+  } finally {
+    $('login').disabled = false;
+  }
+});
+
+$('submit-code').addEventListener('click', async () => {
+  try {
+    await api('/api/code', { method: 'POST', body: JSON.stringify({ code: $('code').value.trim() }) });
+  } catch (error) { alert(error.message); }
+});
+
+$('submit-password').addEventListener('click', async () => {
+  try {
+    await api('/api/password', { method: 'POST', body: JSON.stringify({ password: $('password').value }) });
+  } catch (error) { alert(error.message); }
+});
+
+$('logout').addEventListener('click', async () => {
+  if (!confirm('退出登录？本机会忘掉这个会话。')) return;
+  await api('/api/logout', { method: 'POST' });
+  channels = [];
+  $('files').innerHTML = '';
+});
+
+$('channel').addEventListener('change', () => { loadFiles().catch((e) => alert(e.message)); });
+$('refresh').addEventListener('click', () => { loadFiles().catch((e) => alert(e.message)); });
+
+$('upload').addEventListener('click', async () => {
+  const file = $('file-input').files[0];
+  if (!file) { alert('先选一个文件'); return; }
+  const id = currentChannel();
+  if (!id) { alert('先选一个文件夹'); return; }
+  const form = new FormData();
+  form.append('file', file, file.name);
+  $('upload').disabled = true;
+  show('upload-bar', true);
+  pollProgress();
+  try {
+    await fetch(`/api/channels/${id}/upload`, { method: 'POST', body: form });
+    await loadFiles();
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    $('upload').disabled = false;
+    $('upload-status').textContent = '';
+    show('upload-bar', false);
+    $('file-input').value = '';
+  }
+});
+
+async function pollProgress() {
+  try {
+    const value = await api('/api/progress');
+    if (!value.active) return;
+    const percent = value.total ? Math.round((value.sent / value.total) * 100) : 0;
+    $('upload-bar').firstElementChild.style.width = `${percent}%`;
+    $('upload-status').textContent = `${value.name} · ${formatBytes(value.sent)} / ${formatBytes(value.total)}（${percent}%）`;
+    setTimeout(pollProgress, 500);
+  } catch (_) { /* ignore */ }
+}
+
+loadConfig().then(pollState);
+setInterval(pollState, 1500);
+</script>
+</body>
+</html>

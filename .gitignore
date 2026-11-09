@@ -30,3 +30,6 @@ android/app/release/
 *.aab
 android/keystore.properties
 android/*.jks
+
+# 客户端构建产物（二进制走 release 附件）
+clients/desktop/dist/
