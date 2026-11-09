@@ -64,6 +64,8 @@ cd android
 
 详见 [android/README.md](android/README.md)。
 
+> 上面这个是**依赖服务端**的安卓客户端。另有一份独立客户端计划——Windows exe / Linux 二进制 / Android apk，直连 Telegram、不依赖服务器，映射规则与服务端一致：见 **[docs/CLIENTS.md](docs/CLIENTS.md)**。
+
 ## 架构
 
 ```

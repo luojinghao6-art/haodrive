@@ -64,6 +64,8 @@ cd android
 
 See [android/README.md](android/README.md).
 
+> That app **depends on the server**. There is a separate plan for standalone clients — Windows exe, Linux binary, Android apk — that talk to Telegram directly with no server, using the same mapping rules: see **[docs/CLIENTS.md](docs/CLIENTS.md)**.
+
 ## Architecture
 
 ```
